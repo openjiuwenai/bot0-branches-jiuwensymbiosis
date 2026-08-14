@@ -226,6 +226,26 @@ ROBOT_PARAM_FIELDS: dict[str, tuple[FieldSpec, ...]] = {
             "机器人参数",
             help="eye-to-hand 手眼标定 JSON(含 T_base_cam)路径,相对本配置文件目录或绝对路径。",
         ),
+        FieldSpec(
+            "env.cfg.low_level.grasp_top_surface_enabled",
+            "顶面抓取点(实验)",
+            "bool",
+            "机器人参数",
+            help=(
+                "开启后抓取点取自掩码点云的顶面(base +Z)外接盒中心,而非 mask 2D 质心那一个像素;"
+                "斜视相机不再把物体正面中央当抓取点。关闭时与原行为完全一致。"
+            ),
+            default=False,
+        ),
+        FieldSpec(
+            "env.cfg.low_level.grasp_top_band_mm",
+            "顶面带厚度(mm)",
+            "float",
+            "机器人参数",
+            help="顶面下多少 mm 内算「可夹顶面」;仅在「顶面抓取点」开启时生效。",
+            default=15.0,
+            min_value=0.0,
+        ),
     ),
 }
 

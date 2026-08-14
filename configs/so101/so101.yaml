@@ -71,6 +71,16 @@ env:
       grasp_z_offset_mm: -5.0
       place_z_offset_mm: 30.0
 
+      # 顶面抓取点（实验，默认关）：开启后抓取点取自掩码点云的“yaw-only 外接盒”
+      # （base +Z 顶面），而非 mask 2D 质心那一个像素——斜视相机不再把物体正面
+      # 中央当抓取点。关闭时行为与原来完全一致。grasp_z_offset_mm 语义不变（仍是
+      # “相对顶面向下扎多深”），无需重调。
+      grasp_top_surface_enabled: false
+      grasp_top_band_mm: 15.0        # 顶面下多少 mm 内算“可夹顶面”
+      grasp_top_percentile: 90.0     # 稳健顶面高度用的 Z 百分位（抗深度飞点）
+      grasp_min_points: 30           # 点数低于此值回退到旧的质心选点
+      grasp_mask_erode_px: 2         # 采样深度前向内腐蚀的像素数（去边缘噪声）
+
 # GroundingDINO+SAM2 sidecar。本机路径可由 GDINO_MODEL_ID/SAM2_MODEL_ID 覆盖。
 api_servers:
   - _target_: jiuwensymbiosis.serving.grounding_dino_sam2_server.main
@@ -103,3 +113,7 @@ agent:
   diagnosis_history_steps: 3
   diagnosis_history_kinds: ["reject", "recover"]
   trace_console: true
+  # fast 模式下是否启用实时伺服特殊动作(track_grasp / track_detect)。默认 true;
+  # 设为 false 则 fast 只走逐步动作(analyze→取抓取点→goto→抓),不做连续视觉跟踪伺服。
+  # 对 agent 模式无影响(agent 本就不产生特殊动作)。
+  enable_fast_special_ops: true

@@ -186,6 +186,12 @@ class RobotAgentConfig:
             locates the "current step" via ``ctx.extra`` or
             ``trace.entries[-1]`` (TraceRail / VisualFeedbackRail). Set True
             only with non-motion parallel tools after auditing the rail stack.
+        enable_fast_special_ops: Fast path only — authorize the runner-owned
+            real-time servo ops (``track_grasp`` / ``track_detect``). Defaults
+            True. Set False to force the fast compiler onto plain per-op steps
+            (analyze → grasp-info → goto → grasp) with no continuous tracking
+            loop, without dropping any session capability. No effect on the
+            agent path, which never emits special ops.
     """
 
     mode: Mode = "hybrid"
@@ -229,6 +235,9 @@ class RobotAgentConfig:
     #   Perceive+Act loop with no LLM in the loop). See ExecMode.
     exec_mode: ExecMode = "agent"
     exec_config: Any = None
+    # Authorize fast-path real-time servo ops (track_grasp / track_detect).
+    # Default on; set False to run the fast path with plain per-op steps only.
+    enable_fast_special_ops: bool = True
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> RobotAgentConfig:

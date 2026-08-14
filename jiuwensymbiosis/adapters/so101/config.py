@@ -428,6 +428,21 @@ class So101Config:
     # not expose it as persistent config state or emit it from dataclasses.
     chip_thickness_mm: InitVar[float | None] = None
 
+    # --- top-surface grasp point (opt-in; default off keeps centroid behaviour) ---
+    # When True the grasp XY/Z come from the yaw-only bounding box of the masked
+    # point cloud (base +Z top face) instead of the single mask-centroid pixel, so
+    # an oblique camera no longer grasps the middle of the object's visible front
+    # face. Off → the pipeline is byte-for-byte the previous centroid behaviour.
+    grasp_top_surface_enabled: bool = False
+    # Points within this band below the top count as the graspable top face.
+    grasp_top_band_mm: float = 15.0
+    # Robust "highest surface" percentile of base-frame Z (rejects depth flyers).
+    grasp_top_percentile: float = 90.0
+    # Minimum valid mask points to trust the box; fewer → fall back to centroid.
+    grasp_min_points: int = 30
+    # Mask erosion (px) before sampling depth, dropping unreliable edge pixels.
+    grasp_mask_erode_px: int = 2
+
     task_prompt: str | None = None
     name: str = "so101"
 
@@ -1034,6 +1049,31 @@ class So101Config:
         ):
             if not _is_finite(val):
                 raise ValueError(f"So101Config: {name} must be finite, got {val!r}.")
+
+        # --- top-surface grasp point ------------------------------------------
+        self.grasp_top_surface_enabled = bool(self.grasp_top_surface_enabled)
+        if not _is_finite(self.grasp_top_band_mm) or self.grasp_top_band_mm < 0.0:
+            raise ValueError(
+                f"So101Config: grasp_top_band_mm must be a non-negative finite number, got {self.grasp_top_band_mm!r}."
+            )
+        if not _is_finite(self.grasp_top_percentile) or not (0.0 < self.grasp_top_percentile <= 100.0):
+            raise ValueError(
+                f"So101Config: grasp_top_percentile must be in (0, 100], got {self.grasp_top_percentile!r}."
+            )
+        if (
+            isinstance(self.grasp_min_points, bool)
+            or not isinstance(self.grasp_min_points, int)
+            or self.grasp_min_points < 2
+        ):
+            raise ValueError(f"So101Config: grasp_min_points must be an int >= 2, got {self.grasp_min_points!r}.")
+        if (
+            isinstance(self.grasp_mask_erode_px, bool)
+            or not isinstance(self.grasp_mask_erode_px, int)
+            or self.grasp_mask_erode_px < 0
+        ):
+            raise ValueError(
+                f"So101Config: grasp_mask_erode_px must be a non-negative int, got {self.grasp_mask_erode_px!r}."
+            )
 
         # --- detector sidecar -------------------------------------------------
         if not isinstance(self.detector, DetectorServerConfig):

@@ -187,3 +187,16 @@ def test_queue_log_handler_enqueues_and_keeps_tail():
     assert payload["level"] == "WARNING"
     assert "视觉检测未就绪" in payload["msg"]
     assert "视觉检测未就绪" in handler.log_tail()
+
+
+def test_step_frame_event_carries_index_and_data_uri(tmp_path):
+    import numpy as np
+
+    engine = RunEngine(registry.get_task("pick_box"), {}, workspace=str(tmp_path), body_key="piper")
+    engine.step_frame(3, np.zeros((4, 4, 3), dtype=np.uint8))
+    events = engine.drain()
+    assert len(events) == 1
+    tag, payload = events[0]
+    assert tag == "step_frame"
+    assert payload["index"] == 3
+    assert isinstance(payload["uri"], str) and payload["uri"].startswith("data:image/jpeg;base64,")

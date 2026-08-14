@@ -70,3 +70,22 @@ def pixel_and_depth_to_camera_xyz(uv: tuple[float, float], depth_m: float, intri
     x_mm = (u - ppx) * z_mm / fx
     y_mm = (v - ppy) * z_mm / fy
     return np.array([x_mm, y_mm, z_mm], dtype=np.float64)
+
+
+def pixels_and_depths_to_camera_xyz(
+    us: np.ndarray, vs: np.ndarray, depths_m: np.ndarray, intrinsics: np.ndarray
+) -> np.ndarray:
+    """Vectorized :func:`pixel_and_depth_to_camera_xyz` over ``(N,)`` pixels + depths.
+
+    Returns an ``(N, 3)`` array of camera-frame points in mm (same pinhole model
+    and mm-output convention as the single-pixel helper). Used for projecting a
+    whole segmentation mask to a point cloud instead of one centroid pixel.
+    """
+    us = np.asarray(us, dtype=np.float64)
+    vs = np.asarray(vs, dtype=np.float64)
+    z_mm = np.asarray(depths_m, dtype=np.float64) * 1000.0
+    fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+    ppx, ppy = intrinsics[0, 2], intrinsics[1, 2]
+    x_mm = (us - ppx) * z_mm / fx
+    y_mm = (vs - ppy) * z_mm / fy
+    return np.stack([x_mm, y_mm, z_mm], axis=-1)

@@ -54,6 +54,7 @@ class RunView:
             "step_started": self._on_step_started,
             "step_finished": self._on_step_finished,
             "frame": self._on_frame,
+            "step_frame": self._on_step_frame,
             "narration": self._on_narration,
             "safety_event": self._on_safety_event,
             "log": self._on_log,
@@ -256,6 +257,22 @@ class RunView:
         self._latest_uri = uri
         if not self._viewing_past:
             self._camera.set_source(uri)
+
+    def _on_step_frame(self, payload: dict) -> None:
+        """把某一步的专属画面(检测叠加图:bbox + 抓取位点)钉到该步。
+
+        只写该步的 ``_step_frames``、不动实时画面 ``_latest_uri``;若该步正被查看,
+        立即刷新相机为叠加图,便于抓取失败时定位原因。
+        """
+        idx = int(payload.get("index", -1))
+        uri = payload.get("uri", "")
+        if idx < 0 or not uri:
+            return
+        self._step_frames[idx] = uri
+        if self._selected == idx:
+            self._camera.set_source(uri)
+            self._viewing_past = True
+            self._live_btn.set_visibility(True)
 
     def _on_narration(self, text: str) -> None:
         self._narration.set_text(text)

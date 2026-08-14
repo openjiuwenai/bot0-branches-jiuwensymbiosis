@@ -41,7 +41,12 @@ from jiuwensymbiosis.api.mixins import (
     ParallelGripperMixin,
     VisionMixin,
 )
-from jiuwensymbiosis.utils.geometry import apply_transform, pixel_and_depth_to_camera_xyz
+from jiuwensymbiosis.utils.geometry import (
+    apply_transform,
+    invert_transform,
+    pixel_and_depth_to_camera_xyz,
+    pixels_and_depths_to_camera_xyz,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from jiuwensymbiosis.adapters.so101.env import So101Env
@@ -82,6 +87,11 @@ class So101Api(
         grasp_z_offset_mm: float = -25.0,
         place_z_offset_mm: float = 75.0,
         floor_margin_mm: float = 0.0,
+        grasp_top_surface_enabled: bool = False,
+        grasp_top_band_mm: float = 15.0,
+        grasp_top_percentile: float = 90.0,
+        grasp_min_points: int = 30,
+        grasp_mask_erode_px: int = 2,
     ) -> None:
         super().__init__(env)
         self._detector_service_url = detector_service_url
@@ -92,6 +102,12 @@ class So101Api(
         # Extra clearance above (z_min_safe + this) enforced by the shared grasp
         # geometry; wired from cfg.minimum_floor_margin_mm (SO-101 desk model).
         self._floor_margin_mm = float(floor_margin_mm)
+        # Top-surface grasp point (opt-in via cfg; default off keeps centroid behaviour).
+        self._grasp_top_surface_enabled = bool(grasp_top_surface_enabled)
+        self._grasp_top_band_mm = float(grasp_top_band_mm)
+        self._grasp_top_percentile = float(grasp_top_percentile)
+        self._grasp_min_points = int(grasp_min_points)
+        self._grasp_mask_erode_px = int(grasp_mask_erode_px)
 
     # --- gripper overrides (two-state percentage, no mm/N params) ------------
     @robot_tool(
@@ -343,6 +359,41 @@ class So101Api(
             ll.tf_base_cam,
             pixel_and_depth_to_camera_xyz((float(u), float(v)), float(depth_m), intrinsics),
         )
+
+    def _project_mask_pixels_to_base_raw(self, us: np.ndarray, vs: np.ndarray, depths_m: np.ndarray) -> np.ndarray:
+        """Eye-to-hand batch projection: ``(N,3)`` base points via the constant ``tf_base_cam``.
+
+        The eye-to-hand form of :meth:`_project_pixel_to_base_raw` — one constant
+        ``tf_base_cam @ p_cam`` applied to the whole masked point cloud (no flange
+        read). Used by the top-surface grasp path.
+        """
+        ll = self._ll()
+        if ll.tf_base_cam is None:
+            raise RuntimeError("top-surface grasp needs a loaded eye-to-hand calibration (set calib_path in YAML).")
+        intrinsics, _src = self._resolve_intrinsics(ll)
+        return apply_transform(ll.tf_base_cam, pixels_and_depths_to_camera_xyz(us, vs, depths_m, intrinsics))
+
+    def _project_base_to_pixel(self, xyz_base: Any) -> tuple[float, float] | None:
+        """Eye-to-hand inverse projection: base-frame XYZ (mm) → pixel (u, v), or None.
+
+        Marks the actual top-surface grasp point on the GUI diagnostic overlay.
+        ``p_cam = inv(tf_base_cam) @ p_base``; pixel via the pinhole intrinsics.
+        Returns None when calibration/intrinsics are missing or the point is behind
+        the camera (non-positive depth).
+        """
+        ll = self._ll()
+        if ll.tf_base_cam is None:
+            return None
+        intrinsics, _src = self._resolve_intrinsics(ll)
+        tf_cam_base = invert_transform(np.asarray(ll.tf_base_cam, dtype=np.float64))
+        p_cam = apply_transform(tf_cam_base, np.asarray(xyz_base, dtype=np.float64))
+        z = float(p_cam[2])
+        if not np.isfinite(z) or z <= 0.0:
+            return None
+        k = np.asarray(intrinsics, dtype=np.float64)
+        u = float(k[0, 0]) * float(p_cam[0]) / z + float(k[0, 2])
+        v = float(k[1, 1]) * float(p_cam[1]) / z + float(k[1, 2])
+        return (u, v)
 
     def _grasp_debug_tcp(self) -> Any:
         """Eye-to-hand: the flange pose is irrelevant to projection, so the debug

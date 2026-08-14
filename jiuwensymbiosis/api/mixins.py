@@ -40,10 +40,13 @@ from jiuwensymbiosis.perception.detector_client import init_detector
 from jiuwensymbiosis.perception.vision import (
     GraspFailure,
     GraspResult,
+    annotate_detection_overlay,
     apply_xy_correction,
     build_grasp_result,
     detect_and_centroid,
     dump_grasp_debug,
+    mask_pixels_and_depths,
+    select_top_surface_grasp,
 )
 
 logger = logging.getLogger(__name__)
@@ -262,6 +265,21 @@ class VisionMixin:
     _place_z_offset_mm: float = 75.0
     _floor_margin_mm: float = 0.0
 
+    # Top-surface grasp point (opt-in; default off → unchanged centroid behaviour).
+    # When enabled AND the adapter implements the batch projection seam, the grasp
+    # point comes from the yaw-only bounding box of the masked point cloud instead
+    # of the single mask-centroid pixel.
+    _grasp_top_surface_enabled: bool = False
+    _grasp_top_band_mm: float = 15.0
+    _grasp_top_percentile: float = 90.0
+    _grasp_min_points: int = 30
+    _grasp_mask_erode_px: int = 2
+
+    # Last annotated detection image (RGB ndarray) from get_grasp_info_simple, for
+    # the GUI to show per detection step. Built only when build_overlay=True (the
+    # public tool path), never in the tracking hot loop. Consumed via pop_*.
+    _last_detection_overlay: Any = None
+
     # ---- vendor-specific projection seam ------------------------------------
     def _project_pixel_to_base_raw(self, u: float, v: float, depth_m: float) -> np.ndarray:
         """Project (pixel + metric depth) → RAW base-frame XYZ (mm), NO correction.
@@ -272,6 +290,75 @@ class VisionMixin:
         shared geometry so it runs exactly once. Adapters must implement this.
         """
         raise NotImplementedError
+
+    def _project_mask_pixels_to_base_raw(self, us: np.ndarray, vs: np.ndarray, depths_m: np.ndarray) -> np.ndarray:
+        """Batch of ``_project_pixel_to_base_raw`` → ``(N, 3)`` RAW base-frame points (mm).
+
+        Needed only for top-surface grasp; the eye-to-hand form applies a constant
+        ``tf_base_cam`` once, the eye-in-hand form reads the live flange once and
+        applies ``tf_base_flange @ tf_flange_cam``. Adapters that opt into
+        top-surface grasp implement this; the base raises so opting in without the
+        seam is a loud error, not a silent centroid fallback.
+        """
+        raise NotImplementedError
+
+    def _maybe_top_surface_grasp(self, best: dict, depth_img_m: np.ndarray) -> dict[str, float] | None:
+        """Yaw-only bounding-box grasp point from the masked point cloud, or None.
+
+        Returns ``None`` (caller then uses the centroid pixel) when the feature is
+        off or there are too few valid points to trust the box — a graceful
+        degrade, never worse than the default path.
+        """
+        if not self._grasp_top_surface_enabled:
+            return None
+        us, vs, depths_m = mask_pixels_and_depths(best, depth_img_m, erode_px=self._grasp_mask_erode_px)
+        if us.size < self._grasp_min_points:
+            return None
+        points_base = np.asarray(self._project_mask_pixels_to_base_raw(us, vs, depths_m), dtype=np.float64)
+        return select_top_surface_grasp(
+            points_base,
+            band_mm=self._grasp_top_band_mm,
+            top_percentile=self._grasp_top_percentile,
+            min_points=self._grasp_min_points,
+        )
+
+    def _project_base_to_pixel(self, xyz_base: Any) -> tuple[float, float] | None:
+        """Reproject a base-frame point (mm) to a pixel (u, v), or None if unavailable.
+
+        Inverse of the projection seam, used only to mark the actual grasp point on
+        the GUI diagnostic overlay (top-surface mode, where the grasp XY differs
+        from the mask centroid). Default returns None → the overlay falls back to
+        the mask-centroid pixel. Eye-to-hand/eye-in-hand adapters override it.
+        """
+        return None
+
+    def pop_last_detection_overlay(self) -> Any:
+        """Return and clear the last annotated detection image (RGB ndarray) or None.
+
+        A non-tool accessor for the GUI: the run page pops the overlay after a
+        detection step to show it. Clearing prevents a stale overlay leaking to a
+        later, non-detection step.
+        """
+        overlay = self._last_detection_overlay
+        self._last_detection_overlay = None
+        return overlay
+
+    def _stash_detection_overlay(
+        self, rgb: Any, best: dict, u: float, v: float, result: dict, top_surface: dict | None
+    ) -> None:
+        """Build + stash the annotated detection image (best-effort; never raises)."""
+        try:
+            grasp_uv: tuple[float, float] = (float(u), float(v))
+            if top_surface is not None:
+                reproj = self._project_base_to_pixel(result["position"])
+                if reproj is not None:
+                    grasp_uv = reproj
+            self._last_detection_overlay = annotate_detection_overlay(
+                rgb, best, centroid_uv=(float(u), float(v)), grasp_uv=grasp_uv
+            )
+        except Exception as exc:  # overlay is a diagnostic; never break a grasp
+            logger.debug("[detection-overlay] build failed: %s", exc)
+            self._last_detection_overlay = None
 
     def _vision_driver(self) -> Any:
         """The low-level driver for vision reads (``grab_frames`` / ``calibration``).
@@ -325,9 +412,12 @@ class VisionMixin:
         The full pipeline lives here; adapters supply only the projection seam
         :meth:`_project_pixel_to_base_raw`.
         """
-        return cast("GraspResult | GraspFailure", self._grasp_info_with_intermediates(object_name)[0])
+        result, _ = self._grasp_info_with_intermediates(object_name, build_overlay=True)
+        return cast("GraspResult | GraspFailure", result)
 
-    def _grasp_info_with_intermediates(self, object_name: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    def _grasp_info_with_intermediates(
+        self, object_name: str, *, build_overlay: bool = False
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """Shared grasp pipeline; returns ``(result, intermediates | None)``.
 
         ``intermediates`` carries the detection/projection snapshots so an adapter
@@ -357,7 +447,11 @@ class VisionMixin:
         img_w, img_h = det["img_shape"]
         mask_h, mask_w = det["mask_shape"]
 
-        xyz_raw = np.asarray(self._project_pixel_to_base_raw(u, v, depth_m), dtype=np.float64)
+        top_surface = self._maybe_top_surface_grasp(best, depth_img_m)
+        if top_surface is not None:
+            xyz_raw = np.asarray([top_surface["x"], top_surface["y"], top_surface["z_top"]], dtype=np.float64)
+        else:
+            xyz_raw = np.asarray(self._project_pixel_to_base_raw(u, v, depth_m), dtype=np.float64)
         calib = getattr(ll, "calibration", None)
         result, xyz_final = build_grasp_result(
             object_name=object_name,
@@ -373,6 +467,9 @@ class VisionMixin:
             z_floor=self.env.z_min_safe,
             floor_margin_mm=self._floor_margin_mm,
         )
+        if top_surface is not None:
+            result["grasp_rz"] = top_surface["rz"]
+            result["grasp_width_mm"] = top_surface["width_mm"]
         logger.info(
             "[grasp-debug] %s: raw_xyz_mm=(%.2f, %.2f, %.2f) final_xyz_mm=(%.2f, %.2f, %.2f) "
             "grasp_z=%.1f place_z=%.1f score=%.2f",
@@ -407,6 +504,9 @@ class VisionMixin:
             )
         except Exception as exc:  # debug dump must never break a grasp
             logger.debug("[grasp-debug] dump failed: %s", exc)
+
+        if build_overlay:
+            self._stash_detection_overlay(rgb, best, u, v, result, top_surface)
 
         intermediates = {
             "rgb": rgb,

@@ -10,8 +10,9 @@
 并更新 NiceGUI 元素,跨线程只经这一个队列。
 
 本模块**无 Qt / 无 nicegui 依赖**,可独立单测。事件标签:
-``run_started`` / ``step_started`` / ``step_finished`` / ``frame`` / ``narration`` /
-``safety_event`` / ``log`` / ``run_finished``。``frame`` 的载荷是编码好的 data URI 字符串。
+``run_started`` / ``step_started`` / ``step_finished`` / ``frame`` / ``step_frame`` /
+``narration`` / ``safety_event`` / ``log`` / ``run_finished``。``frame`` 的载荷是编码好的
+data URI 字符串;``step_frame`` 是 ``{"index", "uri"}``(把某步专属画面钉到该步,不改实时画面)。
 
 同一时刻只应有一个运行(日志/检测 sidecar 端口是进程级单例),由界面负责串行化。
 """
@@ -171,6 +172,15 @@ class RunEngine:
             logger.debug("frame encode failed: %s", exc)
             return
         self._events.put(("frame", uri))
+
+    def step_frame(self, idx: int, rgb: Any) -> None:
+        """把某一步的专属画面(检测叠加图)钉到该步,不改实时画面 _latest_uri。"""
+        try:
+            uri = imaging.to_data_uri(rgb)
+        except Exception as exc:  # 坏帧不应中断运行
+            logger.debug("step frame encode failed: %s", exc)
+            return
+        self._events.put(("step_frame", {"index": int(idx), "uri": uri}))
 
     def narration(self, text: str) -> None:
         self._events.put(("narration", text))
