@@ -87,9 +87,7 @@ def test_out_of_reach_is_reach_card():
 
 def test_no_camera_is_camera_card_not_no_detection():
     # 相机没连上时 reason=no_camera 也被包进 "produced no usable result",不能误诊成"没识别到物体"
-    d = diagnose(
-        "RuntimeError: detection for 'black box' produced no usable result (reason=no_camera); aborting"
-    )
+    d = diagnose("RuntimeError: detection for 'black box' produced no usable result (reason=no_camera); aborting")
     assert d.title == "没读到相机画面"
 
 
@@ -109,3 +107,28 @@ def test_fallback_is_conservative():
 def test_module_exports_fix_keys():
     assert diagnostics.FIX_USE_LOCAL_MODEL == "use_local_model"
     assert diagnostics.FIX_USE_HF_MIRROR == "use_hf_mirror"
+
+
+def test_track_grasp_timeout_reads_as_camera_not_object():
+    # track_grasp collapses a dead camera into "not detected"; a frame-timeout in
+    # the log tail must route it to the camera card, not "没识别到目标物体".
+    d = diagnose(
+        "RuntimeError: target 'banana' not detected",
+        log_tail="[SO-101 vision] grab_frames error: Frame didn't arrive within 2000ms",
+    )
+    assert d.title == "没读到相机画面"
+
+
+def test_not_detected_without_camera_evidence_stays_no_detection():
+    d = diagnose("RuntimeError: target 'banana' not detected", log_tail="[runner] track_grasp 'banana' approach")
+    assert d.title == "没识别到目标物体"
+
+
+def test_non_detection_failure_not_hijacked_by_stray_frame_timeout():
+    # A grasp-not-confirmed failure that merely happens to carry a frame-timeout
+    # line in its log tail must NOT be mis-attributed to the camera.
+    d = diagnose(
+        "RuntimeError: grasp_not_confirmed: gripper closed without object contact",
+        log_tail="[SO-101 vision] grab_frames error: Frame didn't arrive within 2000ms",
+    )
+    assert d.title != "没读到相机画面"

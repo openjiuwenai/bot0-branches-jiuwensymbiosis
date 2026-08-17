@@ -246,6 +246,29 @@ def _prescan(session: Any, steps: list[ActionStep]) -> dict[str, dict[str, Any]]
     return cache
 
 
+def _track_miss_error(session: Any, object_name: str) -> RuntimeError:
+    """Build the error for a track op that never saw its target.
+
+    ``track_grasp`` / ``track_detect`` collapse "camera delivered no frame" and
+    "object genuinely absent" into a ``None`` return, which would otherwise always
+    read as a plain "not detected" — and mis-advise the user to check object
+    placement/lighting when the real cause is a dead camera. Probe one detection so
+    a no-frame condition surfaces as ``reason=no_camera`` (the same reason the
+    ``get_grasp_info`` path already reports), which the diagnostics table maps to
+    the camera card.
+    """
+    reason = "not_detected"
+    try:
+        gi = session.api.get_grasp_info_simple(object_name)
+        if isinstance(gi, dict) and gi.get("reason") == "no_camera":
+            reason = "no_camera"
+    except Exception as exc:  # best-effort probe; fall back to the generic reason
+        logger.debug("[runner] track-miss probe raised for %r: %s", object_name, exc)
+    if reason == "no_camera":
+        return RuntimeError(f"target {object_name!r} not detected (reason=no_camera): camera delivered no frame")
+    return RuntimeError(f"target {object_name!r} not detected")
+
+
 def _track_detect(
     session: Any,
     object_name: str,
@@ -728,14 +751,14 @@ def run_sequence(
             if step.op == TRACK_DETECT:
                 det = _track_detect(session, params["object_name"], cfg, cache, occluded=holding)
                 if det is None:
-                    raise RuntimeError(f"target {params['object_name']!r} not detected")
+                    raise _track_miss_error(session, params["object_name"])
                 if step.bind:
                     env[step.bind] = det
                 result: Any = {"detected": det.get("position")}
             elif step.op == TRACK_GRASP:
                 det = _track_grasp(session, params["object_name"], float(params["approach_mm"]), cfg)
                 if det is None:
-                    raise RuntimeError(f"target {params['object_name']!r} not detected")
+                    raise _track_miss_error(session, params["object_name"])
                 if step.bind:
                     env[step.bind] = det
                 tracked_grasp = _TrackedGraspContext(

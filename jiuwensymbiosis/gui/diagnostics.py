@@ -156,6 +156,14 @@ _RULES: tuple[tuple[_Matcher, Diagnosis], ...] = (
     # "produced no usable result" 子串,否则相机/检测器问题会被误诊成"物体没识别到"。
     (lambda err, both: _has(both, "no_camera", "no camera"), _NO_CAMERA),
     (lambda err, both: _has(both, "detector_unavailable"), _MODEL_NOT_READY),
+    # 相机一停出帧,track_grasp/track_detect 会把"没帧"塌缩成"没检出"(报 not detected)。
+    # 若失败是检测形态、且日志尾显示取帧超时,归因到相机而非"物体没摆好"。要求两者同时成立:
+    # 只凭日志里的取帧超时(可能是早先一次瞬时抖动)不足以断定相机故障。
+    (
+        lambda err, both: _has(err, "not detected", "produced no usable result", "no_valid_depth")
+        and _has(both, "grab_frames error", "frame didn't arrive", "frame did not arrive"),
+        _NO_CAMERA,
+    ),
     (lambda err, both: _has(err, "produced no usable result", "not detected", "no_valid_depth"), _NO_DETECTION),
 )
 

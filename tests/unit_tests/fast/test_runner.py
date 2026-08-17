@@ -1015,3 +1015,32 @@ def test_runner_aborts_at_bind_step_when_detection_ran_but_returned_not_ok():
     assert failed["op"] == "get_grasp_info_simple" and not failed["ok"]
     assert "white box" in failed["reason"] and "no_depth" in failed["reason"]
     assert ("home",) in api.calls  # safe retreat ran
+
+
+class TestTrackMissError:
+    """A track op that never saw its target must report a dead camera as
+    no_camera (not a generic "not detected" that mis-advises about placement)."""
+
+    def test_reports_no_camera_when_frame_missing(self):
+        api = types.SimpleNamespace(
+            get_grasp_info_simple=lambda name: {"ok": False, "reason": "no_camera", "object": name}
+        )
+        session = types.SimpleNamespace(api=api)
+        err = runner_module._track_miss_error(session, "banana")
+        assert "no_camera" in str(err)
+
+    def test_plain_not_detected_when_object_absent(self):
+        api = types.SimpleNamespace(get_grasp_info_simple=lambda name: {"ok": False, "reason": "no_detection"})
+        session = types.SimpleNamespace(api=api)
+        err = runner_module._track_miss_error(session, "banana")
+        assert "no_camera" not in str(err)
+        assert "not detected" in str(err)
+
+    def test_falls_back_when_probe_raises(self):
+        def boom(_name):
+            raise RuntimeError("detector down")
+
+        session = types.SimpleNamespace(api=types.SimpleNamespace(get_grasp_info_simple=boom))
+        err = runner_module._track_miss_error(session, "banana")
+        assert "no_camera" not in str(err)
+        assert "not detected" in str(err)
