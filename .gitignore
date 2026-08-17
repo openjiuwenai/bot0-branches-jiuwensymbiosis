@@ -8,3 +8,4 @@ build/
 dist/
 *.egg*
 plans/
+jiuwen_motion_log/
