@@ -288,6 +288,7 @@ class RunEngine:
 
         session = body.build_real_session(self._real_session_config())
         session.cancel_token = self._cancel
+        session.motion_log_dir = agent_cfg.motion_log_dir
         self._apply_fast_exec_config(session, agent_cfg)
 
         bridge = UIBridgeRail(self, session, should_stop=lambda: self._stop)

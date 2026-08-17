@@ -179,6 +179,9 @@ class RobotAgentConfig:
             the relative ``log_path``); the two are independent — jiuwensymbiosis
             does not configure openjiuwen's log path. Set ``None`` for
             console-only.
+        motion_log_dir: Root for the per-run motion log — each run gets its own
+            ``<motion_log_dir>/<stamp>/`` holding ``commands.log`` (piper) and
+            ``grasp_debug/`` (vision). ``None`` → ``"./jiuwen_motion_log"``.
         parallel_tool_calls: Whether the agent loop may dispatch multiple tool
             calls concurrently. Defaults **False** (sequential) — robot motion
             is inherently sequential, and openjiuwen's per-tool ``ctx.extra``
@@ -228,6 +231,10 @@ class RobotAgentConfig:
     # setting; jiuwensymbiosis does not touch openjiuwen's log path. Set None
     # for console-only; override via env or YAML ``agent.log_dir``.
     log_dir: str | None = "./logs"
+    # Root for the per-run motion log: each run → ``<motion_log_dir>/<stamp>/``
+    # with ``commands.log`` (piper) + ``grasp_debug/`` (vision). None →
+    # "./jiuwen_motion_log". Override via YAML ``agent.motion_log_dir``.
+    motion_log_dir: str | None = None
     parallel_tool_calls: bool = False
 
     # --- speed switch (fast path) ---

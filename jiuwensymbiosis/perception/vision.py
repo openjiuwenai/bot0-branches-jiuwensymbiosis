@@ -25,7 +25,6 @@ import itertools
 import json
 import logging
 import os
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -92,13 +91,20 @@ class GraspResult(TypedDict, total=False):
     grasp_width_mm: float  # object extent along the gripper closing axis; top-surface grasp only
 
 
-# Single shared counter so artifacts from multiple sessions don't stomp
-# each other. Resets to 1 on each fresh Python process.
+# Per-run detection index. Each run gets its own output directory (see
+# jiuwensymbiosis.utils.logging.current_run_dir), so the counter resets to 1
+# whenever the target directory changes — every run's artifacts number from 001.
 _GRASP_DEBUG_COUNTER = itertools.count(1)
+_GRASP_DEBUG_COUNTER_DIR: Path | None = None
 
-# Per-process stamp so the default debug dir lands under a unique subdir
-# each time the demo is launched. Computed once at module import.
-_RUN_STAMP = time.strftime("%Y-%m-%d_%H-%M-%S")
+
+def _next_grasp_index(debug_dir: Path) -> int:
+    """Next 1-based artifact index for ``debug_dir``; resets when the dir changes."""
+    global _GRASP_DEBUG_COUNTER, _GRASP_DEBUG_COUNTER_DIR
+    if debug_dir != _GRASP_DEBUG_COUNTER_DIR:
+        _GRASP_DEBUG_COUNTER = itertools.count(1)
+        _GRASP_DEBUG_COUNTER_DIR = debug_dir
+    return next(_GRASP_DEBUG_COUNTER)
 
 
 def _run_detect_pick_best(
@@ -536,28 +542,18 @@ def build_grasp_result(
 def _default_debug_dir() -> Path:
     """Resolve where ``dump_grasp_debug`` writes artifacts.
 
-    Resolution order (first match wins):
-      1. ``$JIUWEN_GRASP_DEBUG_DIR`` (verbatim) — explicit user override.
-      2. ``$JIUWEN_MOTION_LOG_RUN_DIR/grasp_debug`` — current motion-log run.
-      3. ``$JIUWEN_GRASP_DEBUG_ROOT/<run-stamp>`` — legacy explicit root.
-      4. ``$JIUWEN_CMD_LOG_DIR/<run-stamp>/grasp_debug``.
-      5. ``./jiuwen_motion_log/<run-stamp>/grasp_debug``.
-
-    The ``<run-stamp>`` is computed once at module import (``YYYY-MM-DD_HH-MM-SS``)
-    so every invocation of the demo gets its own subdirectory, with detections
-    accumulating in order inside it. Previous runs are NOT overwritten.
+    Defaults to ``<per-run dir>/grasp_debug`` — the run directory established at
+    ``RobotSession.connect()`` and shared with the command log (see
+    ``jiuwensymbiosis.utils.logging.current_run_dir``). ``$JIUWEN_GRASP_DEBUG_DIR``
+    (verbatim) overrides it for ad-hoc debugging. Detections accumulate in order
+    inside the dir and number from ``001`` per run.
     """
     explicit = os.environ.get("JIUWEN_GRASP_DEBUG_DIR")
     if explicit:
         return Path(explicit)
-    motion_run_dir = os.environ.get("JIUWEN_MOTION_LOG_RUN_DIR")
-    if motion_run_dir:
-        return Path(motion_run_dir) / "grasp_debug"
-    legacy_root = os.environ.get("JIUWEN_GRASP_DEBUG_ROOT")
-    if legacy_root:
-        return Path(legacy_root) / _RUN_STAMP
-    motion_root = os.environ.get("JIUWEN_CMD_LOG_DIR", "./jiuwen_motion_log")
-    return Path(motion_root) / _RUN_STAMP / "grasp_debug"
+    from jiuwensymbiosis.utils.logging import current_run_dir
+
+    return current_run_dir() / "grasp_debug"
 
 
 def _save_raw_and_depth(
@@ -752,7 +748,7 @@ def dump_grasp_debug(
         debug_dir = _default_debug_dir()
     try:
         debug_dir.mkdir(parents=True, exist_ok=True)
-        idx = next(_GRASP_DEBUG_COUNTER)
+        idx = _next_grasp_index(debug_dir)
         _save_raw_and_depth(rgb, depth_img, debug_dir, idx)
 
         # Red translucent mask + status-coloured box + yellow centroid marker —

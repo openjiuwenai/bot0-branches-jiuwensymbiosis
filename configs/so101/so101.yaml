@@ -107,6 +107,9 @@ model:
 agent:
   log_level: INFO
   log_dir: ./logs
+  # 每次运行的运动日志根目录:每次运行落到 <motion_log_dir>/<时间戳>/,内含
+  # grasp_debug/(检测调试图)与 commands.log(仅 piper)。留空/不填 = ./jiuwen_motion_log。
+  # motion_log_dir: ./jiuwen_motion_log
   enable_tracing: true
   enable_diagnosis: true        # 依赖 enable_tracing
   diagnosis_max_chars: 1500

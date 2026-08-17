@@ -79,6 +79,11 @@ class RobotSession:
     # identical behaviour for CLI / tests.
     cancel_token: CancelToken | None = field(default=None, init=False, repr=False)
 
+    # Root for the per-run motion log (commands.log + grasp_debug). Set as an
+    # attribute by the runner before connect; None → "./jiuwen_motion_log".
+    # See jiuwensymbiosis.utils.logging.begin_run.
+    motion_log_dir: str | None = field(default=None, init=False, repr=False)
+
     _stack: ExitStack | None = field(default=None, init=False, repr=False)
     _connected: bool = field(default=False, init=False, repr=False)
     # Optional TraceRail (set by build_robot_agent when enable_tracing). Flushed
@@ -100,6 +105,12 @@ class RobotSession:
         """Connect the env and start all sidecars. Idempotent."""
         if self._connected:
             return
+        from jiuwensymbiosis.utils.logging import begin_run
+
+        # Establish this run's output directory before the env driver attaches a
+        # command log (piper) or any grasp-debug dump lands, so all of one run's
+        # motion artifacts share one folder.
+        begin_run(self.motion_log_dir or "./jiuwen_motion_log")
         self._stack = ExitStack()
         # The starter loop is inside the try so a cancel raised between starters
         # (or inside a token-aware sidecar wait) still closes the stack, tearing
