@@ -73,16 +73,17 @@ class FieldSpec:
 # 各字段 default 与框架真实默认一致,使界面显示 = 实际运行行为。
 FIELD_GROUPS: tuple[FieldSpec, ...] = (
     # -- 基础 --
-    FieldSpec("env.cfg.prompt", "任务指令", "text", "基础", help="用自然语言描述要完成的任务;留空则用内置默认。"),
+    FieldSpec("env.cfg.prompt", "任务指令", "text", "基础", help="留空则用内置默认指令。"),
     # -- 执行方式 --
     FieldSpec(
         "agent.mode",
         "智能体模式",
         "choice",
         "执行方式",
-        choices=(("hybrid", "自动选择"), ("tool", "逐步工具调用"), ("code", "构建程序批量执行")),
-        help=(
-            "基于逐步 tool 调用或者基于一次性的 run_python 执行任务或由 agent 自己决定"
+        choices=(
+            ("hybrid", "自动选择"),
+            ("tool", "自主调用工具完成任务"),
+            ("code", "自主构建 python 程序完成任务"),
         ),
         default="hybrid",
     ),
@@ -209,7 +210,7 @@ ROBOT_PARAM_FIELDS: dict[str, tuple[FieldSpec, ...]] = {
             "Z 安全下限(mm)",
             "float",
             "机器人参数",
-            help="控制帧 Z 向硬下限,SafetyRail 据此拦截过低的运动。",
+            help="控制帧 Z 向硬下限,低于它的运动会被拦截。",
             default=30.0,
         ),
         FieldSpec(
@@ -233,7 +234,7 @@ ROBOT_PARAM_FIELDS: dict[str, tuple[FieldSpec, ...]] = {
             "机器人参数",
             help=(
                 "开启后抓取点取自掩码点云的顶面(base +Z)外接盒中心,而非 mask 2D 质心那一个像素;"
-                "斜视相机不再把物体正面中央当抓取点。关闭时与原行为完全一致。"
+                "斜视相机不再把物体正面中央当抓取点。"
             ),
             default=False,
         ),

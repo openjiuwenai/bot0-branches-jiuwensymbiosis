@@ -112,7 +112,7 @@ class RunView:
                 with ui.scroll_area().classes("w-full border rounded").style("height:30vh"):
                     self._timeline = ui.column().classes("w-full gap-1")
                 with ui.scroll_area().classes("w-full border rounded p-2").style("height:12vh"):
-                    self._detail = ui.label("点击左侧某一步查看原始工具调用与参数…").classes(
+                    self._detail = ui.label("待点击具体步骤").classes(
                         "whitespace-pre-wrap font-mono text-xs text-gray-700"
                     )
 
@@ -153,9 +153,7 @@ class RunView:
             ui.button("一键更换", on_click=self._use_mirror)
         self._method2_box.set_visibility(False)
 
-        self._diag_hint = ui.label("如果你熟悉本系统,也可以切到「原始日志」标签查看更详细的报错。").classes(
-            "text-gray-500 text-xs"
-        )
+        self._diag_hint = ui.label("更详细的报错见「原始日志」。").classes("text-gray-500 text-xs")
         self._diag_hint.set_visibility(False)
 
     # ------------------------------------------------------------------ 生命周期
@@ -205,7 +203,7 @@ class RunView:
         self._timeline.clear()
         self._log.clear()
         self._safety.clear()
-        self._detail.set_text("点击左侧某一步查看原始工具调用与参数…")
+        self._detail.set_text("待点击具体步骤")
         self._banner.set_visibility(False)
         self._live_btn.set_visibility(False)
         self._narration.set_text("—")

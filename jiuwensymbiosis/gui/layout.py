@@ -100,13 +100,7 @@ class Layout:
     def _build_drop_dialog(self) -> tuple[ui.dialog, Any, Any]:
         with ui.dialog() as dialog, ui.card().classes("w-[34rem]"):
             name = ui.label("").classes("text-lg font-bold")
-            choice = ui.radio(
-                {
-                    _APPLY_ONLY: "只应用，不存储为未来可选配置",
-                    _APPLY_AND_SAVE: "存储为未来可选配置",
-                },
-                value=_APPLY_ONLY,
-            )
+            choice = ui.radio({_APPLY_ONLY: "只应用", _APPLY_AND_SAVE: "应用并存储"}, value=_APPLY_ONLY)
             with ui.row().classes("w-full justify-end gap-2"):
                 ui.button("取消", on_click=dialog.close).props("flat")
                 ui.button("确认", on_click=self._confirm_drop).props("color=primary")

@@ -139,7 +139,6 @@ class ToolsView:
                     .classes("w-full rounded")
                     .style("background:#111; max-width:760px; cursor:crosshair;")
                 )
-                ui.label("点击画面任意位置显示其深度与基座坐标系下的坐标。").classes("text-sm text-gray-600")
             with ui.column().classes("w-1/3 gap-2"):
                 with ui.card().classes("w-full gap-1"):
                     ui.label("点选读数").classes("font-bold")

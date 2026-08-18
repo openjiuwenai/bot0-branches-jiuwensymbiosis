@@ -51,7 +51,6 @@ class HomeView:
                 on_change=lambda _e: self._on_config_file_change(),
             ).props("outlined dense")
         self._current = ui.label("").classes("text-blue-600 font-bold")
-        ui.label("点任务选择它;再用下方的「运行」「配置」操作当前选中的任务。").classes("text-gray-500 text-sm")
         with ui.scroll_area().classes("w-full grow border rounded"):
             self._list = ui.column().classes("w-full gap-2 p-2")
         with ui.row().classes("gap-2"):
