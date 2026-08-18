@@ -75,6 +75,15 @@ _SERVO_PROGRESS_EPS_DEG = 1e-3
 # point/scheduler jitter. Calls that are materially early remain throttled.
 _SERVO_TIME_EPS_S = 1e-6
 _GRIPPER_COMMAND_STEP = 5.0
+# A joint left under torque can sit in a servo limit cycle: gear backlash and the
+# static-to-kinetic friction drop phase-shift the position loop's own correction
+# into a re-excitation, so the oscillation self-sustains at zero mean error.
+# Widening the dead zone past the measured amplitude (~8 ticks peak) once starves
+# it; the joint then rests inside static friction and the original dead zone can
+# be restored without the shaking resuming.
+_SETTLE_DEAD_ZONE_TICKS = 4
+_SETTLE_DWELL_S = 0.5
+_SETTLE_DEAD_ZONE_REGISTERS = ("CW_Dead_Zone", "CCW_Dead_Zone")
 
 # --------------------------------------------------------------------- constants
 # Order is the LeRobot SO-101 feature naming (see SOFollower motor mapping).
@@ -589,14 +598,37 @@ class So101Driver:
         if robot is None:
             return
         try:
-            if self._cfg.disable_torque_on_disconnect:
-                # SOFollower disconnect already disables torque; keep the flag's
-                # intent honoured when a custom factory overrides the behavior.
-                pass
+            if not self._cfg.disable_torque_on_disconnect:
+                # Leaving with torque on means the servos keep closing the loop
+                # after the port is gone; damp them while we can still talk.
+                self._settle_holding_joints(robot)
             getattr(robot, "disconnect", lambda: None)()
         except Exception as exc:
             # Teardown must never raise; callers rely on idempotent close.
             _logger.debug("SO-101 teardown: robot.disconnect() failed: %s", exc)
+
+    def _settle_holding_joints(self, robot: Any) -> None:
+        """Pulse the arm dead zone wide enough to damp any servo limit cycle."""
+        bus = getattr(robot, "bus", None)
+        if bus is None:
+            return
+        restore: list[tuple[str, str, Any]] = []
+        try:
+            for motor in ARM_JOINT_ORDER:
+                for register in _SETTLE_DEAD_ZONE_REGISTERS:
+                    restore.append((register, motor, bus.read(register, motor, normalize=False)))
+                    bus.write(register, motor, _SETTLE_DEAD_ZONE_TICKS)
+            self._sleep(_SETTLE_DWELL_S)
+        except Exception as exc:
+            _logger.warning("SO-101 teardown: dead-zone settle failed: %s", exc)
+        finally:
+            # Restoring matters more than settling: a widened dead zone left
+            # behind would silently degrade positioning on the next run.
+            for register, motor, value in restore:
+                try:
+                    bus.write(register, motor, value)
+                except Exception as exc:
+                    _logger.warning("SO-101 teardown: restoring %s of %s failed: %s", register, motor, exc)
 
     # --- JointDriver / GripperDriver / observation --------------------------
     def get_angles(self) -> list[float]:

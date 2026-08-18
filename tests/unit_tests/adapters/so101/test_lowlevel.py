@@ -2136,3 +2136,82 @@ class TestHome:
                 np.array([0.0, 0.0, 3.0, 0.0, 0.0]),
                 label="payload",
             )
+
+
+class _FakeDeadZoneBus:
+    """Records dead-zone register traffic; ``fail_write`` forces the error path."""
+
+    def __init__(self, events: list, initial: int = 1, fail_write: bool = False) -> None:
+        self.events = events
+        self.values = {(reg, motor): initial for reg in ("CW_Dead_Zone", "CCW_Dead_Zone") for motor in ARM_JOINT_ORDER}
+        self.fail_write = fail_write
+
+    def read(self, register: str, motor: str, normalize: bool = True) -> int:
+        return self.values[(register, motor)]
+
+    def write(self, register: str, motor: str, value: int) -> None:
+        if self.fail_write:
+            raise RuntimeError("bus write failed")
+        self.values[(register, motor)] = value
+        self.events.append(("write", register, motor, value))
+
+
+def _make_settle_driver(tmp_path, *, disable_torque: bool, fail_write: bool = False):
+    events: list = []
+    follower = FakeFollower(config=None)
+    follower.bus = _FakeDeadZoneBus(events, fail_write=fail_write)
+    orig_disconnect = follower.disconnect
+
+    def recording_disconnect() -> None:
+        events.append(("follower_disconnect",))
+        orig_disconnect()
+
+    follower.disconnect = recording_disconnect
+    cfg = _make_cfg(disable_torque_on_disconnect=disable_torque)
+    driver, _, sleep_log = _make_driver(cfg, tmp_path, follower=follower)
+    return driver, follower, events, sleep_log
+
+
+class TestTeardownSettle:
+    """Leaving the arm under torque must damp the servo limit cycle first."""
+
+    def test_dead_zone_is_widened_then_restored_before_disconnect(self, tmp_path):
+        driver, follower, events, sleep_log = _make_settle_driver(tmp_path, disable_torque=False)
+        driver.connect()
+        driver.disconnect()
+
+        widened = [e for e in events if e[0] == "write" and e[3] != 1]
+        assert {e[2] for e in widened} == set(ARM_JOINT_ORDER)
+        assert {e[3] for e in widened} == {4}
+        assert len(widened) == 2 * len(ARM_JOINT_ORDER), "both CW and CCW dead zones must be pulsed"
+
+        # Every register must be back to its original value on the hardware.
+        assert set(follower.bus.values.values()) == {1}
+
+        disconnect_at = events.index(("follower_disconnect",))
+        assert all(events.index(e) < disconnect_at for e in widened), "settle must finish before the port closes"
+        assert 0.5 in sleep_log, "the servo needs dwell time to bleed off the oscillation"
+
+    def test_no_settle_when_torque_is_released(self, tmp_path):
+        driver, _, events, _ = _make_settle_driver(tmp_path, disable_torque=True)
+        driver.connect()
+        driver.disconnect()
+
+        assert [e for e in events if e[0] == "write"] == []
+        assert ("follower_disconnect",) in events
+
+    def test_write_failure_still_disconnects(self, tmp_path):
+        driver, _, events, _ = _make_settle_driver(tmp_path, disable_torque=False, fail_write=True)
+        driver.connect()
+        driver.disconnect()  # must not raise
+
+        assert ("follower_disconnect",) in events
+        assert driver._connected is False
+
+    def test_follower_without_bus_is_tolerated(self, tmp_path):
+        cfg = _make_cfg(disable_torque_on_disconnect=False)
+        driver, follower, _ = _make_driver(cfg, tmp_path)
+        assert not hasattr(follower, "bus")
+        driver.connect()
+        driver.disconnect()  # must not raise
+        assert follower.connected is False
