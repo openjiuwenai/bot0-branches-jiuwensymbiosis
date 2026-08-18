@@ -47,6 +47,7 @@ __all__ = [
     "list_tasks",
     "get_task",
     "tasks_for_body",
+    "alternate_configs",
     "add_user_task",
 ]
 
@@ -263,6 +264,34 @@ def get_task(key: str) -> TaskDef:
 def tasks_for_body(body_key: str) -> list[TaskDef]:
     """返回适用于某本体的任务(``bodies`` 为空的本体无关任务对所有本体可见)。"""
     return [t for t in _TASKS.values() if not t.bodies or body_key in t.bodies]
+
+
+def _is_body_config(path: Path) -> bool:
+    """该 YAML 能否直接当本体配置用:顶层 ``env.cfg.low_level`` 是映射。
+
+    判据取自 ``<Adapter>Config.from_dict`` 与界面表单共同依赖的嵌套形状——标定 json、
+    纯任务片段等同目录文件据此排除。
+    """
+    env = _read_yaml_mapping(path).get("env")
+    cfg = env.get("cfg") if isinstance(env, dict) else None
+    low_level = cfg.get("low_level") if isinstance(cfg, dict) else None
+    return isinstance(low_level, dict)
+
+
+def alternate_configs(body_key: str) -> list[Path]:
+    """返回该本体默认配置**同目录**下、其余可用作本体配置的 YAML(按文件名排序)。
+
+    供主页「配置文件」下拉在「默认」之外列出候选(如本机专属的 ``*.local.yaml``)。
+    """
+    default = get_body(body_key).config_path()
+    directory = default.parent
+    if not directory.is_dir():
+        return []
+    return [
+        path
+        for path in sorted(directory.iterdir())
+        if path.suffix in (".yaml", ".yml") and path.name != default.name and path.is_file() and _is_body_config(path)
+    ]
 
 
 def add_user_task(

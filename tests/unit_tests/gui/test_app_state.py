@@ -34,6 +34,22 @@ def test_config_for_task_is_cached():
     assert state.config_for("piper", "pick_box") is first  # 同一实例(带缓存)
 
 
+def test_config_for_uses_selected_config_file(tmp_path):
+    alt = tmp_path / "so101.alt.yaml"
+    alt.write_text("env:\n  cfg:\n    low_level:\n      port: /dev/ttyACM9\n", encoding="utf-8")
+
+    state = AppState()
+    default_model = state.config_for("so101", "pick_box")
+    state.current_config_file = str(alt)
+    alt_model = state.config_for("so101", "pick_box")
+
+    assert alt_model is not default_model  # 换配置文件 = 另一份独立可编辑配置
+    assert alt_model.get("env.cfg.low_level.port") == "/dev/ttyACM9"
+    assert alt_model.get("agent.enable_tracing") is True  # 任务/GUI 默认照样叠上
+    state.current_config_file = None
+    assert state.config_for("so101", "pick_box") is default_model  # 切回默认取回原缓存
+
+
 def test_apply_fix_patches_detector_server():
     state = AppState()
     state.current_body = "piper"

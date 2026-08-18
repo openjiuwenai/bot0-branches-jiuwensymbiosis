@@ -4,7 +4,7 @@
 """配置页(NiceGUI 版):按类别分组的常用表单 + 原始 YAML 兜底(双向同步)。
 
 dict 为单一真源(``ConfigModel``)。表单控件按 ``FieldSpec.path`` 绑定到点分路径;
-「原始 YAML」标签可整体编辑其余字段,点「应用 YAML」回填并重建表单。
+「原始 YAML」标签可整体编辑其余字段,点「应用 YAML」(或 Ctrl+S)回填并重建表单。
 """
 
 from __future__ import annotations
@@ -47,7 +47,8 @@ class ConfigView:
         self._refresh_warnings()
 
     # ------------------------------------------------------------------ 表单
-    def _build_form(self) -> None:
+    def _build_form(self, *, active: str | None = None) -> None:
+        """重建表单;``active`` 指定重建后停留的标签(缺省回到第一个分组)。"""
         self._form_host.clear()
         groups = [g for g in GROUP_ORDER if any(s.group == g for s in self._fields)]
         with self._form_host:
@@ -55,7 +56,7 @@ class ConfigView:
                 for group in groups:
                     ui.tab(group)
                 ui.tab(_YAML_TAB)
-            first = groups[0] if groups else _YAML_TAB
+            first = active or (groups[0] if groups else _YAML_TAB)
             with ui.tab_panels(tabs, value=first, on_change=self._on_tab).classes("w-full"):
                 for group in groups:
                     with ui.tab_panel(group):
@@ -64,7 +65,9 @@ class ConfigView:
                     self._yaml = (
                         ui.textarea(value=self._model.to_yaml()).classes("w-full font-mono").props("outlined rows=20")
                     )
-                    ui.button("✔ 应用 YAML 到表单", on_click=self._apply_yaml)
+                    # .prevent 拦掉浏览器自带的 Ctrl+S(保存网页)对话框。
+                    self._yaml.on("keydown.ctrl.s.prevent", lambda _e: self._apply_yaml())
+                    ui.button("应用", on_click=self._apply_yaml)
 
     def _build_group(self, group: str) -> None:
         for spec in [s for s in self._fields if s.group == group]:
@@ -132,5 +135,6 @@ class ConfigView:
         except ValueError as exc:
             ui.notify(f"YAML 无效:{exc}", type="negative")
             return
-        self._build_form()
+        self._build_form(active=_YAML_TAB)  # 应用后仍停在原始 YAML,便于接着改
         self._refresh_warnings()
+        ui.notify("已应用到表单", type="positive", timeout=1500)

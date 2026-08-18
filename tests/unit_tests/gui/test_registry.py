@@ -61,6 +61,28 @@ def test_so101_body_builds_real_session_from_shipped_config():
     assert any(c.startswith("vision.") for c in session.env.capabilities)
 
 
+def _write_body_config(path):
+    path.write_text("env:\n  cfg:\n    low_level:\n      port: /dev/ttyUSB0\n", encoding="utf-8")
+
+
+def test_alternate_configs_lists_sibling_body_configs(tmp_path, monkeypatch):
+    monkeypatch.setattr(registry, "configs_dir", lambda: tmp_path)
+    directory = tmp_path / "so101"
+    directory.mkdir()
+    _write_body_config(directory / "so101.yaml")  # 默认配置本身不重复列出
+    _write_body_config(directory / "so101.local.yaml")
+    (directory / "so101_calib.json").write_text("{}", encoding="utf-8")
+    (directory / "notes.yaml").write_text("tasks: []\n", encoding="utf-8")  # 无 env.cfg.low_level
+    (directory / "broken.yaml").write_text("a: [", encoding="utf-8")
+
+    assert [p.name for p in registry.alternate_configs("so101")] == ["so101.local.yaml"]
+
+
+def test_alternate_configs_empty_when_dir_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(registry, "configs_dir", lambda: tmp_path)
+    assert registry.alternate_configs("so101") == []
+
+
 def test_load_tasks_merges_user_tasks(tmp_path, monkeypatch):
     user_dir = tmp_path / "gui"
     user_dir.mkdir()

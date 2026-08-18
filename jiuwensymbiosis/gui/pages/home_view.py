@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""主页(NiceGUI 版):本体选择 + 任务列表(一行一个)+ 操作按钮。
+"""主页(NiceGUI 版):本体 + 配置文件选择 + 任务列表(一行一个)+ 操作按钮。
 
 点任务卡片即「选中」它(高亮 + 顶部显示「当前任务」);「运行」「配置」按钮作用于当前
 选中的任务。开局自动选中第一个任务,消除「没有当前任务」的死角。
@@ -18,6 +18,9 @@ from jiuwensymbiosis.gui import registry
 from jiuwensymbiosis.gui.app_state import AppState
 
 __all__ = ["HomeView"]
+
+# 「配置文件」下拉里代表「本体默认配置」的取值(其余取值是配置文件绝对路径)。
+_DEFAULT_CONFIG = ""
 
 
 class HomeView:
@@ -38,7 +41,13 @@ class HomeView:
             self._body = ui.select(
                 {b.key: b.display_name for b in bodies},
                 value=bodies[0].key if bodies else None,
-                on_change=lambda _e: self._refresh_cards(),
+                on_change=lambda _e: self._on_body_change(),
+            ).props("outlined dense")
+            ui.label("配置文件:").classes("ml-4")  # 与本体下拉拉开一点距离
+            self._config_file = ui.select(
+                {_DEFAULT_CONFIG: "默认"},
+                value=_DEFAULT_CONFIG,
+                on_change=lambda _e: self._on_config_file_change(),
             ).props("outlined dense")
         self._current = ui.label("").classes("text-blue-600 font-bold")
         ui.label("点任务选择它;再用下方的「运行」「配置」操作当前选中的任务。").classes("text-gray-500 text-sm")
@@ -47,7 +56,25 @@ class HomeView:
         with ui.row().classes("gap-2"):
             self._run_btn = ui.button("▶ 运行", on_click=self._run_current).props("color=primary")
             self._cfg_btn = ui.button("⚙ 配置", on_click=self._config_current)
+        self._refresh_config_files()
         self._refresh_cards()
+
+    def _on_body_change(self) -> None:
+        """换本体:配置文件候选随本体重建(旧选择对新本体无意义),再刷新任务列表。"""
+        self._refresh_config_files()
+        self._refresh_cards()
+
+    def _refresh_config_files(self) -> None:
+        """按当前本体重建配置文件下拉,并把选择重置为默认。"""
+        body_key = self._body.value
+        options = {_DEFAULT_CONFIG: "默认"}
+        if body_key is not None:
+            options.update({str(path): path.name for path in registry.alternate_configs(body_key)})
+        self._config_file.set_options(options, value=_DEFAULT_CONFIG)
+        self._state.current_config_file = None
+
+    def _on_config_file_change(self) -> None:
+        self._state.current_config_file = self._config_file.value or None
 
     def selected_task(self) -> str | None:
         return self._selected

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from jiuwensymbiosis.gui import local_models, registry
@@ -29,26 +30,29 @@ class AppState:
         self.workspace = workspace or default_workspace()
         self.current_task: str | None = None
         self.current_body: str | None = None
+        # 主页「配置文件」下拉选中的本体配置绝对路径;None = 用本体的默认配置。
+        self.current_config_file: str | None = None
         self.engine: RunEngine | None = None
-        # 配置属**本体**(与任务无关),按 (本体, 任务) 缓存:同一本体+任务共享一份可编辑配置,
-        # 换本体则各自独立(本体无关任务在不同本体下用各自本体的配置)。
-        self._configs: dict[tuple[str, str], ConfigModel] = {}
+        # 配置属**本体**(与任务无关),按 (本体, 任务, 配置文件) 缓存:同一组合共享一份可编辑
+        # 配置,换本体/换配置文件则各自独立(本体无关任务在不同本体下用各自本体的配置)。
+        self._configs: dict[tuple[str, str, str], ConfigModel] = {}
 
     def config_for(self, body_key: str, task_key: str) -> ConfigModel:
-        """取(本体, 任务)的配置模型。
+        """取(本体, 任务)在当前所选配置文件下的配置模型。
 
         优先缓存,否则从**本体**配置 YAML 载入,套上任务的 agent 默认与默认指令
         (本体配置缺失则用默认指令起步)。
         """
-        cache_key = (body_key, task_key)
+        cache_key = self._cache_key(body_key, task_key)
         if cache_key in self._configs:
             return self._configs[cache_key]
         body = registry.get_body(body_key)
         task = registry.get_task(task_key)
+        config_path = Path(self.current_config_file) if self.current_config_file else body.config_path()
         try:
-            model = ConfigModel.from_yaml_text(body.config_path().read_text(encoding="utf-8"))
+            model = ConfigModel.from_yaml_text(config_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            logger.debug("load config for body %s failed, using default prompt: %s", body_key, exc)
+            logger.debug("load config %s failed, using default prompt: %s", config_path, exc)
             model = ConfigModel.from_dict({"env": {"cfg": {"prompt": task.default_query}}})
         # 任务级默认(如 pick_banana 的 fast/技能/步数):配置未显式设置时填入。
         for name, val in task.agent_defaults.items():
@@ -68,7 +72,10 @@ class AppState:
         return model
 
     def set_config(self, body_key: str, task_key: str, model: ConfigModel) -> None:
-        self._configs[(body_key, task_key)] = model
+        self._configs[self._cache_key(body_key, task_key)] = model
+
+    def _cache_key(self, body_key: str, task_key: str) -> tuple[str, str, str]:
+        return (body_key, task_key, self.current_config_file or "")
 
     def current_config(self) -> ConfigModel | None:
         """当前(选中本体, 选中任务)的配置模型;任一未选则 None。"""
