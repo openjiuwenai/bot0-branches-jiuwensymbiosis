@@ -21,6 +21,7 @@ __all__ = ["HomeView"]
 
 # 「配置文件」下拉里代表「本体默认配置」的取值(其余取值是配置文件绝对路径)。
 _DEFAULT_CONFIG = ""
+_DEFAULT_LABEL = "原始配置模板"
 
 
 class HomeView:
@@ -45,7 +46,7 @@ class HomeView:
             ).props("outlined dense")
             ui.label("配置文件:").classes("ml-4")  # 与本体下拉拉开一点距离
             self._config_file = ui.select(
-                {_DEFAULT_CONFIG: "默认"},
+                {_DEFAULT_CONFIG: _DEFAULT_LABEL},
                 value=_DEFAULT_CONFIG,
                 on_change=lambda _e: self._on_config_file_change(),
             ).props("outlined dense")
@@ -64,14 +65,20 @@ class HomeView:
         self._refresh_config_files()
         self._refresh_cards()
 
-    def _refresh_config_files(self) -> None:
-        """按当前本体重建配置文件下拉,并把选择重置为默认。"""
+    def reload_configs(self) -> None:
+        """配置目录里新增/更新了可选配置后重建下拉(保留当前选择)。"""
+        self._refresh_config_files(keep_selection=True)
+
+    def _refresh_config_files(self, *, keep_selection: bool = False) -> None:
+        """按当前本体重建配置文件下拉;``keep_selection`` 为假(换本体)时重置为原始配置模板。"""
         body_key = self._body.value
-        options = {_DEFAULT_CONFIG: "默认"}
+        options = {_DEFAULT_CONFIG: _DEFAULT_LABEL}
         if body_key is not None:
-            options.update({str(path): path.name for path in registry.alternate_configs(body_key)})
-        self._config_file.set_options(options, value=_DEFAULT_CONFIG)
-        self._state.current_config_file = None
+            options.update({str(path): path.stem for path in registry.alternate_configs(body_key)})
+        current = self._config_file.value
+        value = current if keep_selection and current in options else _DEFAULT_CONFIG
+        self._config_file.set_options(options, value=value)
+        self._state.current_config_file = value or None
 
     def _on_config_file_change(self) -> None:
         self._state.current_config_file = self._config_file.value or None

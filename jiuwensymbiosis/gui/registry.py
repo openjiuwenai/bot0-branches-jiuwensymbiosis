@@ -48,6 +48,9 @@ __all__ = [
     "get_task",
     "tasks_for_body",
     "alternate_configs",
+    "is_body_config_text",
+    "body_config_path",
+    "save_body_config",
     "add_user_task",
 ]
 
@@ -266,16 +269,51 @@ def tasks_for_body(body_key: str) -> list[TaskDef]:
     return [t for t in _TASKS.values() if not t.bodies or body_key in t.bodies]
 
 
-def _is_body_config(path: Path) -> bool:
-    """该 YAML 能否直接当本体配置用:顶层 ``env.cfg.low_level`` 是映射。
+def _is_body_config_mapping(data: dict[str, Any]) -> bool:
+    """该配置映射能否直接当本体配置用:顶层 ``env.cfg.low_level`` 是映射。
 
     判据取自 ``<Adapter>Config.from_dict`` 与界面表单共同依赖的嵌套形状——标定 json、
-    纯任务片段等同目录文件据此排除。
+    纯任务片段等据此排除。
     """
-    env = _read_yaml_mapping(path).get("env")
+    env = data.get("env")
     cfg = env.get("cfg") if isinstance(env, dict) else None
     low_level = cfg.get("low_level") if isinstance(cfg, dict) else None
     return isinstance(low_level, dict)
+
+
+def is_body_config_text(text: str) -> bool:
+    """YAML 文本能否直接当本体配置用(供拖入文件时判定)。"""
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        logger.debug("拖入的 YAML 解析失败: %s", exc)
+        return False
+    return isinstance(data, dict) and _is_body_config_mapping(data)
+
+
+def _is_body_config(path: Path) -> bool:
+    return _is_body_config_mapping(_read_yaml_mapping(path))
+
+
+def body_config_path(body_key: str, name: str) -> Path:
+    """该本体配置目录下、名为 ``name`` 的配置文件路径。
+
+    ``name`` 只取文件名部分(挡住 ``../`` 之类的目录穿越),缺扩展名时补 ``.yaml``。
+    """
+    stem = Path(name.strip()).name
+    if not stem:
+        raise ValueError("配置名不能为空。")
+    if not stem.endswith((".yaml", ".yml")):
+        stem = f"{stem}.yaml"
+    return get_body(body_key).config_path().parent / stem
+
+
+def save_body_config(body_key: str, name: str, text: str) -> Path:
+    """把 YAML 文本存进该本体的配置目录,返回落盘路径(同名即覆盖)。"""
+    path = body_config_path(body_key, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
 def alternate_configs(body_key: str) -> list[Path]:

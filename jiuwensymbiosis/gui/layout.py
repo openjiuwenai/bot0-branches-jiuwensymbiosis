@@ -6,11 +6,15 @@
 取代 Qt 版的 ``QMainWindow`` + ``QStackedWidget`` + 菜单栏。持有跨页共享状态
 (``AppState``:当前任务、配置缓存、工作区、正在运行的引擎),把各页动作接到运行链路。
 同一时刻只允许一个运行(检测 sidecar 端口/日志是进程级单例)。
+
+页面区(标签面板)整体接受拖入的 YAML:文件在浏览器侧读成文本送回,是本体配置就弹框问
+「只应用」还是「同时存为可选配置」。
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 from nicegui import app, ui
 
@@ -29,6 +33,16 @@ __all__ = ["build_layout", "Layout"]
 _HISTORY = "历史"
 _CONFIG = "配置"
 _TOOLS = "工具"
+
+_APPLY_ONLY = "apply"
+_APPLY_AND_SAVE = "save"
+
+# 拖放:只收第一个 .yaml/.yml 文件,浏览器侧读成文本后回传(超过 2MB 的当作误拖忽略)。
+_DROP_JS = (
+    "async (e) => { const f = e.dataTransfer?.files?.[0];"
+    " if (!f || !/\\.ya?ml$/i.test(f.name) || f.size > 2000000) return;"
+    " emit({name: f.name, text: await f.text()}); }"
+)
 
 
 class Layout:
@@ -59,11 +73,15 @@ class Layout:
             self._history_tab = ui.tab(_HISTORY)
             self._settings_tab = ui.tab("设置")
 
-        with ui.tab_panels(self._tabs, value=self._home_tab, on_change=self._on_nav).classes("w-full grow"):
+        with ui.tab_panels(self._tabs, value=self._home_tab, on_change=self._on_nav).classes("w-full grow") as panels:
             with ui.tab_panel(self._home_tab):
                 self._home = HomeView(self._state, on_run=self._start_run, on_config=self._open_config)
             with ui.tab_panel(self._config_tab):
-                self._config = ConfigView(on_run=self._run_current_config, on_back=lambda: self._goto(self._home_tab))
+                self._config = ConfigView(
+                    on_run=self._run_current_config,
+                    on_back=lambda: self._goto(self._home_tab),
+                    on_config_saved=self._home.reload_configs,
+                )
             with ui.tab_panel(self._run_tab):
                 self._run = RunView(on_stop=self._stop_run, on_fix=self._state.apply_fix, on_rerun=self._rerun)
             with ui.tab_panel(self._tools_tab):
@@ -72,6 +90,66 @@ class Layout:
                 self._history = HistoryView(self._state.workspace)
             with ui.tab_panel(self._settings_tab):
                 self._settings = SettingsView(self._state.workspace, on_workspace_change=self._set_workspace)
+
+        self._dropped: tuple[str, str] | None = None
+        self._drop_dialog, self._drop_name, self._drop_choice = self._build_drop_dialog()
+        panels.on("dragover.prevent", js_handler="() => {}")  # 不 preventDefault 浏览器就不允许放下
+        panels.on("drop.prevent", self._on_yaml_dropped, js_handler=_DROP_JS)
+
+    # ------------------------------------------------------------------ 拖入配置
+    def _build_drop_dialog(self) -> tuple[ui.dialog, Any, Any]:
+        with ui.dialog() as dialog, ui.card().classes("w-[34rem]"):
+            name = ui.label("").classes("text-lg font-bold")
+            choice = ui.radio(
+                {
+                    _APPLY_ONLY: "只应用，不存储为未来可选配置",
+                    _APPLY_AND_SAVE: "存储为未来可选配置",
+                },
+                value=_APPLY_ONLY,
+            )
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("取消", on_click=dialog.close).props("flat")
+                ui.button("确认", on_click=self._confirm_drop).props("color=primary")
+        return dialog, name, choice
+
+    def _on_yaml_dropped(self, e: Any) -> None:
+        """浏览器侧读好的 YAML 文本到达:是本体配置才弹框,否则一句提示。"""
+        payload = e.args[0] if isinstance(e.args, list) and e.args else e.args
+        if not isinstance(payload, dict):
+            return
+        name, text = str(payload.get("name", "")), str(payload.get("text", ""))
+        if not registry.is_body_config_text(text):
+            ui.notify(f"{name} 不是可用的本体配置(需包含 env.cfg.low_level)。", type="negative")
+            return
+        self._dropped = (name, text)
+        self._drop_name.set_text(name)
+        self._drop_choice.set_value(_APPLY_ONLY)
+        self._drop_dialog.open()
+
+    def _confirm_drop(self) -> None:
+        """应用拖入的配置(可选同时存进本体配置目录)。"""
+        if self._dropped is None:
+            return
+        name, text = self._dropped
+        model = self._state.current_config()
+        body_key = self._state.current_body
+        if model is None or body_key is None:
+            ui.notify("请先在主页选择一个本体与任务。", type="warning")
+            return
+        model.replace_from_yaml(text)
+        self._drop_dialog.close()
+        self._dropped = None
+        self._sync_config_view()
+        if self._drop_choice.value != _APPLY_AND_SAVE:
+            ui.notify(f"已应用 {name}", type="positive", timeout=2000)
+            return
+        try:
+            path = registry.save_body_config(body_key, name, text)
+        except (ValueError, OSError) as exc:
+            ui.notify(f"已应用 {name}，但保存失败:{exc}", type="negative")
+            return
+        self._home.reload_configs()
+        ui.notify(f"已应用并保存:{path}", type="positive", timeout=2500)
 
     def _build_quit_dialog(self) -> ui.dialog:
         """确认后关停整个应用(NiceGUI 服务器随之退出;重开请再点桌面图标/启动脚本)。"""
