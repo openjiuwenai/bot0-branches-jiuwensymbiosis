@@ -32,6 +32,7 @@ from typing import Any, cast
 
 from jiuwensymbiosis.agent.abstractions import AgentRail
 from jiuwensymbiosis.agent.trace import TraceEventSink
+from jiuwensymbiosis.errors import SafetyViolationError
 
 logger = logging.getLogger(__name__)
 
@@ -208,11 +209,11 @@ class SafetyRail(AgentRail):
             except (TypeError, ValueError):
                 reason = f"{name} is not a number: {raw!r}"
                 self._notify_reject(tool_name, reason)
-                raise ValueError(f"SafetyRail: refusing {tool_name}: {reason}.") from None
+                raise SafetyViolationError(f"SafetyRail: refusing {tool_name}: {reason}.") from None
             if not math.isfinite(value):
                 reason = f"{name} is non-finite: {raw!r}"
                 self._notify_reject(tool_name, reason)
-                raise ValueError(f"SafetyRail: refusing {tool_name}: {reason}.")
+                raise SafetyViolationError(f"SafetyRail: refusing {tool_name}: {reason}.")
             return value
 
         cx = _coerce("x", x)
@@ -223,7 +224,9 @@ class SafetyRail(AgentRail):
         if cz is not None and z_floor is not None and cz < float(z_floor):
             reason = f"z={z} below z_floor={z_floor}"
             self._notify_reject(tool_name, reason)
-            raise ValueError(f"SafetyRail: refusing {tool_name}: {reason}. Either raise z, or call home() first.")
+            raise SafetyViolationError(
+                f"SafetyRail: refusing {tool_name}: {reason}. Either raise z, or call home() first."
+            )
 
         xy_bounds = self._resolve_xy_bounds()
         if xy_bounds is not None:
@@ -231,11 +234,11 @@ class SafetyRail(AgentRail):
             if cx is not None and not xmin <= cx <= xmax:
                 reason = f"x={x} out of bounds [{xmin}, {xmax}]"
                 self._notify_reject(tool_name, reason)
-                raise ValueError(f"SafetyRail: refusing {tool_name}: {reason}.")
+                raise SafetyViolationError(f"SafetyRail: refusing {tool_name}: {reason}.")
             if cy is not None and not ymin <= cy <= ymax:
                 reason = f"y={y} out of bounds [{ymin}, {ymax}]"
                 self._notify_reject(tool_name, reason)
-                raise ValueError(f"SafetyRail: refusing {tool_name}: {reason}.")
+                raise SafetyViolationError(f"SafetyRail: refusing {tool_name}: {reason}.")
 
     def _resolve_z_floor(self) -> float | None:
         """Z floor: explicit ``z_floor``, else the env's ``z_min_safe``, else None."""
@@ -286,18 +289,18 @@ class SafetyRail(AgentRail):
         if q is None:
             reason = "missing required joint vector q"
             self._notify_reject(tool_name, reason)
-            raise ValueError(f"SafetyRail: refusing {tool_name}: {reason}.")
+            raise SafetyViolationError(f"SafetyRail: refusing {tool_name}: {reason}.")
         if not isinstance(q, (list, tuple)):
             reason = f"q must be a list or tuple, got {type(q).__name__}"
             self._notify_reject(tool_name, reason)
-            raise ValueError(f"SafetyRail: refusing {tool_name}: {reason}.")
+            raise SafetyViolationError(f"SafetyRail: refusing {tool_name}: {reason}.")
 
         limits = self._resolve_joint_limits()
         names: list[str] = list(limits.keys()) if limits is not None else []
         if limits is not None and len(q) != len(names):
             reason = f"q has {len(q)} joints but limits has {len(names)}"
             self._notify_reject(tool_name, reason)
-            raise ValueError(f"SafetyRail: refusing {tool_name}: {reason}.")
+            raise SafetyViolationError(f"SafetyRail: refusing {tool_name}: {reason}.")
 
         for i, raw in enumerate(q):
             try:
@@ -305,19 +308,19 @@ class SafetyRail(AgentRail):
             except (TypeError, ValueError):
                 reason = f"{self._joint_label(names, i)} is not a number: {raw!r}"
                 self._notify_reject(tool_name, reason)
-                raise ValueError(f"SafetyRail: refusing {tool_name}: {reason}.") from None
+                raise SafetyViolationError(f"SafetyRail: refusing {tool_name}: {reason}.") from None
             if not math.isfinite(v):
                 label = self._joint_label(names, i)
                 reason = f"{label} is non-finite: {raw!r}"
                 self._notify_reject(tool_name, reason)
-                raise ValueError(f"SafetyRail: refusing {tool_name}: {reason}.")
+                raise SafetyViolationError(f"SafetyRail: refusing {tool_name}: {reason}.")
             if limits is not None:
                 lo, hi = limits[names[i]]
                 if not float(lo) <= v <= float(hi):
                     label = self._joint_label(names, i)
                     reason = f"{label}={v} out of limits [{float(lo)}, {float(hi)}]"
                     self._notify_reject(tool_name, reason)
-                    raise ValueError(f"SafetyRail: refusing {tool_name}: {reason}.")
+                    raise SafetyViolationError(f"SafetyRail: refusing {tool_name}: {reason}.")
 
     @staticmethod
     def _joint_label(names: list[str], i: int) -> str:

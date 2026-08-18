@@ -31,6 +31,9 @@ from typing import Any, Literal, TypedDict
 
 import numpy as np
 
+from jiuwensymbiosis.errors import DETECTION_REASONS as DETECTION_REASONS  # re-export
+from jiuwensymbiosis.errors import DetectionReason
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -42,24 +45,11 @@ logger = logging.getLogger(__name__)
 # vs ``no_detection`` etc.). ``detect_and_centroid`` and the default eye-in-hand
 # helpers emit only reasons from this set; ``no_camera`` is the adapter-level
 # reason (the frame grab returned None before detection ran).
+#
+# The reasons themselves live in ``jiuwensymbiosis.errors`` (a leaf module) so the
+# runner / rails / GUI can share one closed set of failure codes without importing
+# this module's numpy-backed pipeline; imported above and re-exported for callers.
 # ---------------------------------------------------------------------------
-DETECTION_REASONS = frozenset(
-    {
-        "no_camera",
-        "no_detection",
-        "empty_mask",
-        "no_valid_depth",
-        "detector_unavailable",
-    }
-)
-
-DetectionReason = Literal[
-    "no_camera",
-    "no_detection",
-    "empty_mask",
-    "no_valid_depth",
-    "detector_unavailable",
-]
 
 
 class GraspFailure(TypedDict):

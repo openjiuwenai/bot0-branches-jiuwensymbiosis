@@ -26,6 +26,7 @@ from jiuwensymbiosis.agent.fast.realtime.mask_tracking import MaskTargetFilter, 
 from jiuwensymbiosis.agent.fast.realtime.servo import ServoConfig, ServoResult
 from jiuwensymbiosis.agent.fast.runner import SkillExecConfig, run_sequence
 from jiuwensymbiosis.agent.fast.sequence import parse_sequence
+from jiuwensymbiosis.errors import error_code
 
 
 class _FakeApi:
@@ -1017,6 +1018,56 @@ def test_runner_aborts_at_bind_step_when_detection_ran_but_returned_not_ok():
     assert ("home",) in api.calls  # safe retreat ran
 
 
+class TestFailedStepCarriesErrorCode:
+    """A failed step records the machine code next to the human reason, so the GUI
+    looks the cause up instead of re-deriving it by grepping the text."""
+
+    def test_detection_reason_becomes_the_step_code(self):
+        api = _FakeApi(_GRASP_OBJ)
+
+        def executor(op, params):
+            del op, params
+            return {"ok": True, "result": {"ok": False, "reason": "no_valid_depth"}}
+
+        raw = [{"op": "get_grasp_info_simple", "params": {"object_name": "white box"}, "bind": "w"}]
+        steps = parse_sequence(raw, allowed_ops=set(_index(api)), special_ops=frozenset())
+        res = run_sequence(_session(api), steps, executor=executor)
+
+        assert res["steps"][-1]["error_code"] == "no_valid_depth"
+
+    def test_executor_code_survives_the_step_boundary(self):
+        api = _FakeApi(_GRASP_OBJ)
+
+        def executor(op, params):
+            del op, params
+            return {"ok": False, "reason": "SafetyRail: refusing goto_xyzr", "error_code": "safety_rejected"}
+
+        steps = parse_sequence([{"op": "home"}], allowed_ops=set(_index(api)), special_ops=frozenset())
+        res = run_sequence(_session(api), steps, executor=executor)
+
+        assert res["steps"][-1]["error_code"] == "safety_rejected"
+
+    def test_step_without_a_code_reports_an_empty_one(self):
+        api = _FakeApi(_GRASP_OBJ)
+
+        def executor(op, params):
+            del op, params
+            return {"ok": False, "reason": "RuntimeError: something else"}
+
+        steps = parse_sequence([{"op": "home"}], allowed_ops=set(_index(api)), special_ops=frozenset())
+        res = run_sequence(_session(api), steps, executor=executor)
+
+        assert res["steps"][-1]["error_code"] == ""
+
+    def test_servo_failure_keeps_the_dispatch_code(self):
+        # ServoResult already carries the typed rejection raised at dispatch; the
+        # runner must not drop it when it turns the phase into a step failure.
+        res = ServoResult(False, "stopped", 3, 0.5, None, None, "refused", "safety_rejected")
+        err = runner_module._servo_failure("track_grasp descend", res)
+        assert error_code(err) == "safety_rejected"
+        assert "track_grasp descend failed: stopped: refused" in str(err)
+
+
 class TestTrackMissError:
     """A track op that never saw its target must report a dead camera as
     no_camera (not a generic "not detected" that mis-advises about placement)."""
@@ -1028,6 +1079,12 @@ class TestTrackMissError:
         session = types.SimpleNamespace(api=api)
         err = runner_module._track_miss_error(session, "banana")
         assert "no_camera" in str(err)
+        assert error_code(err) == "no_camera"
+
+    def test_miss_without_camera_evidence_codes_as_no_detection(self):
+        api = types.SimpleNamespace(get_grasp_info_simple=lambda name: {"ok": False, "reason": "no_detection"})
+        err = runner_module._track_miss_error(types.SimpleNamespace(api=api), "banana")
+        assert error_code(err) == "no_detection"
 
     def test_plain_not_detected_when_object_absent(self):
         api = types.SimpleNamespace(get_grasp_info_simple=lambda name: {"ok": False, "reason": "no_detection"})

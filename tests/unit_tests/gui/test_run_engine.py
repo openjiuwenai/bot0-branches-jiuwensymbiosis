@@ -104,6 +104,19 @@ def test_run_emits_ordered_event_stream(tmp_path, monkeypatch):
     assert result["ok"] is True
 
 
+def test_finished_run_carries_log_tail_for_diagnosis(tmp_path, monkeypatch):
+    # 无异常≠成功:fast 内层步骤失败也走这一支,诊断要拿得到日志尾佐证
+    _use_hardware_free_session(monkeypatch, tmp_path)
+    _patch_script_runner(monkeypatch, _SCRIPT)
+    engine = RunEngine(registry.get_task("pick_box"), {}, workspace=str(tmp_path), body_key="piper")
+    engine.start()
+    engine.join(timeout=5)
+
+    result = engine.drain()[-1][1]
+    assert result["ok"] is True
+    assert isinstance(result["log_tail"], str)
+
+
 def test_run_frames_are_encoded_data_uris(tmp_path, monkeypatch):
     _use_hardware_free_session(monkeypatch, tmp_path)
     _patch_script_runner(monkeypatch, _SCRIPT)

@@ -31,6 +31,7 @@ from typing import Any
 
 from jiuwensymbiosis.agent import ModelSpec, RobotAgentConfig, run_robot_task
 from jiuwensymbiosis.agent.cancel import CancelToken, RunCancelled
+from jiuwensymbiosis.errors import error_code
 from jiuwensymbiosis.gui import imaging
 from jiuwensymbiosis.gui.bridge import UIBridgeRail
 from jiuwensymbiosis.gui.config_model import ConfigModel
@@ -243,7 +244,15 @@ class RunEngine:
             self._events.put(
                 (
                     "run_finished",
-                    {"ok": True, "result": result, "conversation_id": conv_id, "workspace": self._workspace},
+                    {
+                        "ok": True,
+                        "result": result,
+                        "conversation_id": conv_id,
+                        "workspace": self._workspace,
+                        # 无异常≠成功:fast 内层步骤失败也走这一支,界面同样要开诊断。
+                        # 日志尾是诊断的佐证输入,这里不带上,诊断就只能看到一句错误串。
+                        "log_tail": handler.log_tail(),
+                    },
                 )
             )
         except RunCancelled:
@@ -269,6 +278,7 @@ class RunEngine:
                         "error": f"{type(exc).__name__}: {exc}",
                         "ok": False,
                         "error_type": type(exc).__name__,
+                        "error_code": error_code(exc),
                         "log_tail": handler.log_tail(),
                     },
                 )

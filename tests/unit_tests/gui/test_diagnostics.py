@@ -5,50 +5,34 @@
 
 from __future__ import annotations
 
+from jiuwensymbiosis import errors
 from jiuwensymbiosis.gui import diagnostics
 from jiuwensymbiosis.gui.diagnostics import FIX_USE_HF_MIRROR, FIX_USE_LOCAL_MODEL, diagnose
 
 
-def test_gdino_missing_weights_is_model_not_ready():
-    d = diagnose(
-        "detector server exited (code 1) before becoming ready",
-        log_tail="[detector] OSError: ... does not appear to have a file named model.safetensors",
-    )
-    assert "模型" in d.title  # 面向用户,标题讲"模型未就绪"而非"权重"
-    assert FIX_USE_LOCAL_MODEL in d.fixes and FIX_USE_HF_MIRROR in d.fixes
-
-
-def test_sam2_processor_missing_is_model_not_ready():
-    # SAM2 缺 processor_config.json,应归入"模型未就绪",且文案不能只提 GroundingDINO
-    d = diagnose(
-        "detector server exited (code 1) before becoming ready",
-        log_tail="[detector] OSError: Can't load processor for 'facebook/sam2.1-hiera-large' ... processor_config.json",
-    )
-    assert "模型" in d.title
-    assert "SAM2" in d.cause
-    assert FIX_USE_LOCAL_MODEL in d.fixes and FIX_USE_HF_MIRROR in d.fixes
-
-
-def test_detector_timeout_network_mentions_network():
-    d = diagnose(
-        "detector server not ready on 127.0.0.1:8114 within 300s",
-        log_tail="[detector] httpx ... Connection to huggingface.co timed out",
-    )
+def test_detector_startup_failure_offers_model_fixes():
+    # 检测器起不来时端口始终不开,真实错误串只有这一种形态(detector_sidecar.py);
+    # needle 必须跟它逐字对齐,否则规则形同虚设。
+    d = diagnose("RuntimeError: detector server did not start on 127.0.0.1:8114 within 300s")
     assert "超时" in d.title
-    assert "网络" in d.cause or "huggingface" in d.cause
     assert FIX_USE_LOCAL_MODEL in d.fixes and FIX_USE_HF_MIRROR in d.fixes
 
 
-def test_detector_crash_without_weight_signature_is_generic_detector():
-    d = diagnose("detector server exited (code 1) before becoming ready", log_tail="[detector] some other error")
-    assert d.title == "视觉检测器启动失败"
-    assert FIX_USE_LOCAL_MODEL in d.fixes
+def test_detector_startup_cause_covers_missing_model_not_only_network():
+    d = diagnose("RuntimeError: detector server did not start on 127.0.0.1:8114 within 300s")
+    assert "模型" in d.cause and "huggingface" in d.cause  # 不把成因写死成"网络不通"
 
 
 def test_port_in_use():
     d = diagnose("RuntimeError: address already in use")
     assert "端口" in d.title
     assert d.fixes == ()
+
+
+def test_port_word_in_a_message_is_not_port_in_use():
+    # "port" + "in use" 两个泛词凑巧同现不足以判端口占用
+    d = diagnose("RuntimeError: serial port /dev/ttyACM0 is in use by another process")
+    assert "端口被占用" not in d.title
 
 
 def test_llm_auth_failure():
@@ -122,6 +106,57 @@ def test_track_grasp_timeout_reads_as_camera_not_object():
 def test_not_detected_without_camera_evidence_stays_no_detection():
     d = diagnose("RuntimeError: target 'banana' not detected", log_tail="[runner] track_grasp 'banana' approach")
     assert d.title == "没识别到目标物体"
+
+
+def test_code_wins_over_the_text_rules():
+    # 源头已经写下 code,就不该再由文本猜:这里文本明明是"检测没结果"
+    d = diagnose("RuntimeError: detection produced no usable result", code="no_camera")
+    assert d.title == "没读到相机画面"
+
+
+def test_code_lookup_survives_a_text_that_looks_like_something_else():
+    d = diagnose("RuntimeError: serial port /dev/ttyACM0 error", code="grasp_not_confirmed")
+    assert d.title == "夹爪合拢后没夹到东西"
+
+
+def test_safety_rejection_code_gets_its_own_card():
+    d = diagnose("SafetyViolationError: SafetyRail: refusing goto_xyzr: z=-9 below z_floor=0", code="safety_rejected")
+    assert d.title == "动作被安全护栏拦下"
+    assert d.steps  # 给出可操作的下一步,而不是只报错
+
+
+def test_unknown_code_falls_back_to_the_text_rules():
+    # 适配器自带的 code 没有对应卡时,不能吃掉文本判断
+    d = diagnose("RuntimeError: target 'banana' not detected", code="cartesian_bounds_rejected")
+    assert d.title == "没识别到目标物体"
+
+
+def test_code_table_only_uses_known_codes():
+    assert set(diagnostics._CODE_TABLE) <= errors.ERROR_CODES
+
+
+def test_every_rule_needs_a_main_error_signal():
+    # 结构不变量:没有任何一条规则可以只凭日志尾命中
+    assert all(rule.err_needles for rule in diagnostics._RULES)
+
+
+def test_noisy_log_tail_alone_does_not_hijack_an_unknown_error():
+    noisy = "\n".join(
+        [
+            "INFO jiuwensymbiosis: opening serial port /dev/ttyACM0",
+            "INFO jiuwensymbiosis: probe returned 401",
+            "WARNING jiuwensymbiosis: address already in use",
+            "WARNING jiuwensymbiosis: CUDA out of memory",
+        ]
+    )
+    d = diagnose("RuntimeError: something we have no rule for", log_tail=noisy)
+    assert d.title == "运行失败"
+
+
+def test_structured_reason_beats_generic_hardware_wording():
+    # 相机报错里带 "serial"(相机序列号),不能被"机械臂连接失败"那条泛词规则抢走
+    d = diagnose("RuntimeError: camera serial 34AB no frames; detection produced no usable result (reason=no_camera)")
+    assert d.title == "没读到相机画面"
 
 
 def test_non_detection_failure_not_hijacked_by_stray_frame_timeout():
