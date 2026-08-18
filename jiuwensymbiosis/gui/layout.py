@@ -165,7 +165,7 @@ class Layout:
         """确认后重启整个应用:关停当前服务器并拉起一个新的(硬件/检测服务一并重连)。"""
         return self._confirm_dialog(
             title="重启 Jiuwen Symbiosis？",
-            body="将关停当前应用并重新启动(硬件/检测服务一并重连)。浏览器会自动打开新页面。",
+            body="将关停当前应用并重新启动(硬件/检测服务一并重连)。",
             confirm_label="重启",
             confirm_props="color=primary",
             on_confirm=self._do_restart,
@@ -186,7 +186,11 @@ class Layout:
         self._restart_dialog.open()
 
     def _do_restart(self) -> None:
-        """确认重启:拉起接替进程(它等本进程让出端口后自己起服务器),亮「正在重启」再延时关停本进程。"""
+        """确认重启:拉起接替进程(它等本进程让出端口后自己起服务器),亮「正在重启」再延时关停本进程。
+
+        接替进程不开浏览器:本页面的 socket 断开后会一直重连,连上新服务器时握手失败(clientId
+        对不上),NiceGUI 前端据此自行 reload——于是同一个标签页被复用,重启多少次都不多开页面。
+        """
         from jiuwensymbiosis.gui.app import spawn_replacement
 
         # 释放相机/CAN,免得接替进程重连硬件时被占用。
@@ -319,8 +323,8 @@ class Layout:
 
     @staticmethod
     def _build_restarting_dialog() -> ui.dialog:
-        """重启中提示,新页面稍候由接替进程自动打开。"""
-        return Layout._notice_dialog("正在重启 Jiuwen Symbiosis…", "新页面稍候自动打开,可关闭此标签页。")
+        """重启中提示;接替进程起来后本页面自行重连刷新(勿关标签页)。"""
+        return Layout._notice_dialog("正在重启 Jiuwen Symbiosis…", "本页面会在服务就绪后自动刷新,请勿关闭。")
 
     @staticmethod
     def _confirm_dialog(
