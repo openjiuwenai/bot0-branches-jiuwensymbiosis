@@ -794,22 +794,27 @@ def run_sequence(
                 if step.op in _GRIP_CLOSE_OPS:
                     sleep_cancellable(max(0.0, cfg.settle_grip_s), token)
                     confirmed = _grasp_confirmation(session.api, result)
-                    if confirmed is False and tracked_grasp is not None and cfg.max_grasp_retries > 0:
-                        retry_det, result, retry_count = _retry_unconfirmed_grasp(
-                            session,
-                            tracked_grasp,
-                            cfg,
-                            run_op,
-                        )
-                        if tracked_grasp.bind:
-                            env[tracked_grasp.bind] = retry_det
-                        if isinstance(result, dict):
-                            result = {**result, "grasp_retry_attempts": retry_count}
+                    # An empty close is a failure however the approach was planned.
+                    # Only the RETRY needs a track_grasp context (it re-runs that op);
+                    # without one the step still has to fail closed rather than let
+                    # the sequence carry on placing an object it is not holding.
+                    if confirmed is False:
+                        if tracked_grasp is not None and cfg.max_grasp_retries > 0:
+                            retry_det, result, retry_count = _retry_unconfirmed_grasp(
+                                session,
+                                tracked_grasp,
+                                cfg,
+                                run_op,
+                            )
+                            if tracked_grasp.bind:
+                                env[tracked_grasp.bind] = retry_det
+                            if isinstance(result, dict):
+                                result = {**result, "grasp_retry_attempts": retry_count}
+                            else:
+                                result = {"result": result, "grasp_retry_attempts": retry_count}
+                            confirmed = _grasp_confirmation(session.api, result)
                         else:
-                            result = {"result": result, "grasp_retry_attempts": retry_count}
-                        confirmed = _grasp_confirmation(session.api, result)
-                    elif confirmed is False and tracked_grasp is not None:
-                        raise GraspNotConfirmedError("grasp_not_confirmed: gripper closed without object contact")
+                            raise GraspNotConfirmedError("grasp_not_confirmed: gripper closed without object contact")
                     holding = confirmed is not False
                     tracked_grasp = None
                 elif step.op in _GRIP_OPEN_OPS:

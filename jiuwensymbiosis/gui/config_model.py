@@ -103,9 +103,7 @@ FIELD_GROUPS: tuple[FieldSpec, ...] = (
         "快速模式(fast)",
         "bool",
         "执行方式",
-        help=(
-            "开启快速模式后，会在开始时用一次 LLM 规划出整条动作序列并直接执行。"
-        ),
+        help=("开启快速模式后，会在开始时用一次 LLM 规划出整条动作序列并直接执行。"),
         default="fast",
         on_value="fast",
         off_value="agent",
@@ -149,9 +147,7 @@ FIELD_GROUPS: tuple[FieldSpec, ...] = (
         "禁用视觉服务",
         "bool",
         "机器人参数",
-        help=(
-            "打开后本次真机运行不启动视觉检测器、不打开相机。"
-        ),
+        help=("打开后本次真机运行不启动视觉检测器、不打开相机。"),
         default=False,
     ),
     # -- 模型 --
@@ -180,9 +176,7 @@ ROBOT_PARAM_FIELDS: dict[str, tuple[FieldSpec, ...]] = {
             "相机序列号",
             "str",
             "机器人参数",
-            help=(
-                "腕部 RealSense 相机的序列号，留空则不会启用相机"
-            ),
+            help=("腕部 RealSense 相机的序列号，留空则不会启用相机"),
         ),
     ),
     "so101": (
@@ -261,9 +255,7 @@ DETECTOR_FIELDS: tuple[FieldSpec, ...] = (
         "GroundingDINO 模型",
         "str",
         "视觉服务",
-        help=(
-            "填写 HuggingFace repo id 或本地目录，填写 repo id 时自动加载本地快照"
-        ),
+        help=("填写 HuggingFace repo id 或本地目录，填写 repo id 时自动加载本地快照"),
         default="IDEA-Research/grounding-dino-base",
     ),
     FieldSpec(
@@ -271,9 +263,7 @@ DETECTOR_FIELDS: tuple[FieldSpec, ...] = (
         "SAM2 模型",
         "str",
         "视觉服务",
-        help=(
-            "填写 HuggingFace repo id 或本地目录，填写 repo id 时自动加载本地快照"
-        ),
+        help=("填写 HuggingFace repo id 或本地目录，填写 repo id 时自动加载本地快照"),
         default="facebook/sam2.1-hiera-large",
     ),
 )

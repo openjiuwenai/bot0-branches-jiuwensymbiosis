@@ -33,14 +33,23 @@ class RunView:
     """实时监看页。``on_stop`` 停止本次运行,``on_fix`` 把一键修复补丁沉淀进配置。"""
 
     def __init__(
-        self, *, on_stop: Callable[[], None], on_fix: Callable[[dict], None], on_rerun: Callable[[], None]
+        self,
+        *,
+        on_stop: Callable[[], None],
+        on_fix: Callable[[dict], None],
+        on_rerun: Callable[[], None],
+        on_start_pose: Callable[[list[float]], None] = lambda _joints: None,
+        on_return_to_start: Callable[[], None] = lambda: None,
     ) -> None:
         """搭建状态条、主视觉区、步骤时间线与技术抽屉,并挂上拉取事件的定时器。"""
         self._on_stop = on_stop
         self._on_fix = on_fix
         self._on_rerun = on_rerun
+        self._on_start_pose = on_start_pose
+        self._on_return_to_start = on_return_to_start
         self._engine: Any = None
         self._running = False
+        self._has_start_pose = False
         self._t0 = 0.0
         self._rows: dict[int, Any] = {}
         self._details: dict[int, str] = {}
@@ -59,6 +68,9 @@ class RunView:
             "safety_event": self._on_safety_event,
             "log": self._on_log,
             "run_finished": self._on_run_finished,
+            "start_pose": self._on_start_pose_event,
+            "pose_return_started": self._on_pose_return_started,
+            "pose_return_finished": self._on_pose_return_finished,
         }
 
         # 错误诊断区的 UI 句柄:真正构建在 _build_diagnosis,此处先声明。
@@ -86,6 +98,10 @@ class RunView:
             self._stop_btn.disable()
             self._rerun_btn = ui.button("↻ 重新执行", on_click=self._on_rerun_clicked).props("color=primary")
             self._rerun_btn.disable()
+            # 回到本次开跑时机械臂所在的姿态。运行结束后才可点:回位是真机自主运动,
+            # 不能和任务抢机械臂。
+            self._return_btn = ui.button("⇤ 回到起始位", on_click=self._on_return_clicked).props("flat")
+            self._return_btn.disable()
 
         self._banner = (
             ui.label().classes("w-full").style("background:#fff3cd; color:#7a5b00; padding:6px; border-radius:4px;")
@@ -194,6 +210,8 @@ class RunView:
 
     def _reset(self) -> None:
         self._rerun_btn.disable()
+        self._return_btn.disable()
+        self._has_start_pose = False
         self._rows.clear()
         self._details.clear()
         self._step_frames.clear()
@@ -288,6 +306,9 @@ class RunView:
         self._running = False
         self._stop_btn.disable()
         self._rerun_btn.enable()  # 任何终态(成功/失败/未完成/已停止)都可同配置重跑
+        if self._has_start_pose:
+            # 失败/中断的运行同样可以回位——臂多半正停在半路上,这时候最需要它。
+            self._return_btn.enable()
         outcome = outcome_from_result(result)
         self._set_badge(outcome.status)
         self._narration.set_text(outcome.narration)
@@ -336,6 +357,34 @@ class RunView:
     def _on_rerun_clicked(self) -> None:
         self._rerun_btn.disable()
         self._on_rerun()
+
+    def _on_return_clicked(self) -> None:
+        self._return_btn.disable()
+        self._on_return_to_start()
+
+    # ------------------------------------------------------------------ 回到起始位
+    def _on_start_pose_event(self, payload: dict) -> None:
+        """本次运行开跑时的关节角:交给上层保管,运行结束后才拿它回位。"""
+        self._on_start_pose(list(payload.get("joints") or []))
+        self._has_start_pose = True
+
+    def _on_pose_return_started(self, _payload: dict) -> None:
+        self._set_badge("运行中")
+        self._narration.set_text("正在回到起始位，请离开工作区…")
+        self._return_btn.disable()
+        self._rerun_btn.disable()
+
+    def _on_pose_return_finished(self, payload: dict) -> None:
+        self._rerun_btn.enable()
+        if payload.get("ok"):
+            self._set_badge("完成")
+            self._narration.set_text("已回到本次运行开始时的姿态。")
+            return
+        self._set_badge("失败")
+        error = str(payload.get("error", ""))
+        self._narration.set_text("回到起始位失败:" + error)
+        self._log.push(f"ERROR 回到起始位失败: {error}")
+        self._return_btn.enable()
 
     # ------------------------------------------------------------------ 错误诊断
     def _show_diagnosis(self, diag: Diagnosis) -> None:

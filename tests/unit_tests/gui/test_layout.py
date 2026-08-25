@@ -32,6 +32,87 @@ def _drop(layout: Layout, name: str, text: str) -> None:
     layout._on_yaml_dropped(SimpleNamespace(args=[{"name": name, "text": text}]))
 
 
+def test_jumping_to_a_config_field_loads_the_form_first(layout):
+    """切标签不会重建表单(``_on_nav`` 认标签名,``_goto`` 传的是 Tab 对象),
+    不先 load 就会误报「表单里没有这个字段」—— 而字段没填正是跳过来的原因。"""
+    layout._open_config_field("env.cfg.low_level.camera_serial")
+
+    assert layout._tabs.value is layout._config_tab
+    assert layout._config._form_tabs.value == "机器人参数"
+
+
+def test_a_run_will_not_start_while_a_tool_still_holds_the_hardware(layout):
+    """标定的自动采集中途停不下来:硬开跑会变成两边同时占相机、同时对机械臂下指令。"""
+    layout._tools.release_hardware = lambda **_kw: False
+    started: list[str] = []
+    layout._run.attach = lambda engine: started.append("attached")
+
+    layout._start_run(layout._state.current_task)
+
+    assert started == []
+    assert layout._state.engine is None
+
+
+class TestReturnToStart:
+    @staticmethod
+    def _armed(layout) -> list[list[float]]:
+        """给 layout 一份可用快照与一个记录回位请求的假引擎。"""
+        layout._state.current_body = registry.list_bodies()[0].key
+        layout._state.remember_start_pose(layout._state.current_body, [1.0, 2.0])
+        returned: list[list[float]] = []
+        layout._state.engine = SimpleNamespace(
+            is_running=lambda: False,
+            start_return_to=returned.append,
+        )
+        return returned
+
+    def test_a_valid_snapshot_opens_the_confirmation(self, layout):
+        self._armed(layout)
+
+        layout._confirm_return_to_start()
+
+        assert layout._return_dialog.value is True
+
+    def test_switching_body_invalidates_the_snapshot(self, layout):
+        self._armed(layout)
+        layout._state.current_body = "some-other-body"
+
+        layout._confirm_return_to_start()
+
+        assert layout._return_dialog.value is False
+
+    def test_a_running_task_blocks_the_confirmation(self, layout):
+        self._armed(layout)
+        layout._state.engine = SimpleNamespace(is_running=lambda: True)
+
+        layout._confirm_return_to_start()
+
+        assert layout._return_dialog.value is False
+
+    def test_a_tool_holding_the_arm_blocks_the_move(self, layout):
+        """回位是真机自主运动,和松力矩摆位抢机械臂会同时对它下指令。"""
+        returned = self._armed(layout)
+        layout._tools.release_hardware = lambda **_kw: False
+
+        layout._do_return_to_start()
+
+        assert returned == []
+
+    def test_confirmed_move_targets_the_recorded_joints(self, layout):
+        returned = self._armed(layout)
+        layout._tools.release_hardware = lambda **_kw: True
+
+        layout._do_return_to_start()
+
+        assert returned == [[1.0, 2.0]]
+
+    def test_a_snapshot_needs_a_body(self, layout):
+        layout._state.current_body = None
+        layout._remember_start_pose([1.0, 2.0])
+
+        assert layout._state.start_pose_joints() is None
+
+
 def test_drop_of_body_config_opens_dialog_defaulting_to_apply_only(layout):
     _drop(layout, "arm.local.yaml", _DROPPED_YAML)
     assert layout._drop_dialog.value is True

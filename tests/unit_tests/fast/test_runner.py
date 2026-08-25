@@ -200,6 +200,26 @@ def test_unconfirmed_track_grasp_homes_redetects_and_retries_once(monkeypatch):
     assert result["steps"][1]["result"]["grasp_retry_attempts"] == 1
 
 
+def test_unconfirmed_grasp_fails_a_plain_detect_and_goto_sequence():
+    api = _ContactAwareApi(["closed"])
+    api.objects = _GRASP_OBJ
+    raw = [
+        {"op": "open_gripper"},
+        {"op": "get_grasp_info_simple", "params": {"object_name": "box"}, "bind": "b"},
+        {"op": "goto_xyzr", "params": {"x": "b.x", "y": "b.y", "z": "b.grasp_z"}},
+        {"op": "close_gripper"},
+        {"op": "goto_xyzr", "params": {"x": "b.x", "y": "b.y", "z": "b.place_z"}},
+    ]
+    steps = parse_sequence(raw, allowed_ops=set(_index(api)), special_ops=frozenset())
+
+    result = run_sequence(_session(api), steps, config=_tracking_config(settle_grip_s=0.0), action_index=_index(api))
+
+    assert result["ok"] is False
+    assert result["steps"][-1]["op"] == "close_gripper"
+    assert "grasp_not_confirmed" in result["steps"][-1]["reason"]
+    assert ("goto", 250.0, 90.0, 80.0) not in api.calls
+
+
 def test_second_unconfirmed_grasp_returns_home_and_fails(monkeypatch):
     api = _ContactAwareApi(["closed", "closed"])
     detection = {"x": 100.0, "y": 50.0, "z": 70.0, "position": [100.0, 50.0, 70.0], "grasp_z": 40.0}

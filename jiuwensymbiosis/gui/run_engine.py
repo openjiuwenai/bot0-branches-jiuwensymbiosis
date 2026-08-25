@@ -197,6 +197,18 @@ class RunEngine:
         self._thread = Thread(target=self._run, name="jiuwen-gui-run", daemon=True)
         self._thread.start()
 
+    def start_return_to(self, joints: list[float]) -> None:
+        """起线程:连接 → 关节运动到 ``joints`` → 断连。不跑 agent、不起检测服务。
+
+        走引擎自己这条线是为了继承既有互斥:``AppState.is_busy()`` 认的就是这个线程,
+        于是回位期间开跑 / 重启都会被同一道门拦住,不必另立一套占用登记。
+        """
+        if self._thread is not None and self._thread.is_alive():
+            return
+        target = [float(v) for v in joints]
+        self._thread = Thread(target=lambda: self._run_return_to(target), name="jiuwen-gui-return", daemon=True)
+        self._thread.start()
+
     def request_stop(self) -> None:
         """请求停止:置步间标志,并触发取消 token(打断在飞的连接/编译/运动等待)。"""
         self._stop = True
@@ -235,6 +247,7 @@ class RunEngine:
             )
             conv_id = f"gui-{uuid.uuid4().hex[:8]}"
             with session:
+                self._emit_start_pose(session)
                 self._emit_initial_frame(session)
                 # 连接已完成,接下来 run_robot_task 先做 fast 的唯一云端大模型调用(编译动作序列),
                 # 通常要等十几~几十秒。给个明确提示:这段是在等云侧模型响应,不是本地卡死。
@@ -286,6 +299,22 @@ class RunEngine:
         finally:
             log.removeHandler(handler)
 
+    def _run_return_to(self, joints: list[float]) -> None:
+        """回位线程主体:连接 → 关节运动 → 断连,结果入队。"""
+        self._events.put(("pose_return_started", {"joints": list(joints)}))
+        try:
+            body = get_body(self._body_key)
+            session = body.build_real_session(self._real_session_config(), include_sidecars=False)
+            with session:
+                # 走驱动的关节运动而不是 home():``home_use_init_pose`` 的本体在这次
+                # 新连接时又把当前姿态当成了 home,home() 会原地不动。目标点是上次开跑
+                # 时机械臂实际所在的位置,路径由驱动逐点预校验(限位/FK/桌面间隙)。
+                session.env.low_level.move_joint_blocking(list(joints))
+            self._events.put(("pose_return_finished", {"ok": True}))
+        except Exception as exc:
+            logger.exception("回到起始位失败")
+            self._events.put(("pose_return_finished", {"ok": False, "error": f"{type(exc).__name__}: {exc}"}))
+
     # ------------------------------------------------------------------ 内部
     def _build(self) -> tuple[Any, RobotAgentConfig, str]:
         """把界面选择组装成 (session, agent_cfg, query)。"""
@@ -316,6 +345,25 @@ class RunEngine:
         if self._config.get("gui.disable_vision"):
             data = strip_vision_services(data)
         return resolve_real_session_config(data, get_body(self._body_key).config_path().parent)
+
+    def _emit_start_pose(self, session: Any) -> None:
+        """连接后记下开跑姿态,供运行结束后的「回到起始位」。
+
+        必须在这里取:``home_use_init_pose`` 的本体把连接那一刻的关节角当 home,而会话
+        一断这个值就没了,事后再连读到的已经是运行结束的姿态。没有关节、或驱动不支持
+        关节运动的本体不发事件 —— 与其给一个走不到的目标,不如让按钮保持禁用。
+        """
+        from jiuwensymbiosis.env.protocol import JointDriver
+
+        if not isinstance(getattr(session.env, "low_level", None), JointDriver):
+            return
+        try:
+            joints = session.env.get_observation().joints
+        except Exception as exc:  # 取不到不影响运行,只是没有回位目标
+            logger.debug("start pose snapshot failed: %s", exc)
+            return
+        if joints:
+            self._events.put(("start_pose", {"body": self._body_key, "joints": [float(v) for v in joints]}))
 
     def _emit_initial_frame(self, session: Any) -> None:
         """连接后先推一帧初始相机画面,让主视觉区不为空。"""

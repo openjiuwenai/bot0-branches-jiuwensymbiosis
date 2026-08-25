@@ -67,6 +67,42 @@ def test_apply_fix_noop_without_current_task():
     assert state.current_task is None
 
 
+def test_start_pose_survives_within_the_same_body_and_config():
+    state = AppState()
+    state.current_body = "piper"
+    state.remember_start_pose("piper", [1.0, 2.0])
+
+    assert state.start_pose_joints() == [1.0, 2.0]
+
+
+def test_start_pose_is_dropped_after_switching_body():
+    """关节数与限位都可能对不上,拿 A 本体的姿态喂 B 本体是往硬件里塞垃圾。"""
+    state = AppState()
+    state.current_body = "piper"
+    state.remember_start_pose("piper", [1.0, 2.0])
+
+    state.current_body = "so101"
+
+    assert state.start_pose_joints() is None
+
+
+def test_start_pose_is_dropped_after_switching_config_file():
+    state = AppState()
+    state.current_body = "piper"
+    state.remember_start_pose("piper", [1.0, 2.0])
+
+    state.current_config_file = "/tmp/other.yaml"
+
+    assert state.start_pose_joints() is None
+
+
+def test_no_start_pose_before_any_run():
+    state = AppState()
+    state.current_body = "piper"
+
+    assert state.start_pose_joints() is None
+
+
 def test_not_busy_before_any_run():
     assert AppState().is_busy() is False
 

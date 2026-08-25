@@ -161,6 +161,128 @@ def test_drain_is_empty_before_start(tmp_path):
     assert engine.is_running() is False
 
 
+class _JointDriver:
+    """满足 ``JointDriver`` 的假驱动(真类:runtime_checkable 用 getattr_static)。"""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.moved: list[list[float]] = []
+        self.homed = 0
+        self._fail = fail
+
+    def get_angles(self):
+        return [0.0, 0.0]
+
+    def move_joint_blocking(self, q, *, timeout_s=None):
+        if self._fail:
+            raise RuntimeError("out of soft limits")
+        self.moved.append(list(q))
+
+    def home(self):
+        self.homed += 1
+
+
+class _Session:
+    """假会话。必须是真类:``with`` 的 dunder 查找在类型上,SimpleNamespace 顶不了。"""
+
+    def __init__(self, env) -> None:
+        self.env = env
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _pose_session(monkeypatch, tmp_path, *, driver, joints):
+    """把 ``get_body`` 换成一个产出可控 env 的桩,并记下 build 时的关键字。"""
+    seen: dict = {}
+    session = _Session(
+        SimpleNamespace(low_level=driver, get_observation=lambda: SimpleNamespace(joints=joints, rgb=None))
+    )
+
+    def build(_cfg, *, include_sidecars=True):
+        seen["include_sidecars"] = include_sidecars
+        return session
+
+    monkeypatch.setattr(
+        run_engine_module,
+        "get_body",
+        lambda _key: SimpleNamespace(build_real_session=build, config_path=lambda: tmp_path / "body.yaml"),
+    )
+    return seen
+
+
+def _engine(tmp_path):
+    return RunEngine(registry.get_task("pick_box"), {}, workspace=str(tmp_path), body_key="piper")
+
+
+def test_start_pose_snapshot_carries_the_joints_at_connect(tmp_path, monkeypatch):
+    _pose_session(monkeypatch, tmp_path, driver=_JointDriver(), joints=[1.0, 2.0])
+    engine = _engine(tmp_path)
+
+    engine._emit_start_pose(run_engine_module.get_body("piper").build_real_session({}))
+
+    assert engine.drain() == [("start_pose", {"body": "piper", "joints": [1.0, 2.0]})]
+
+
+def test_start_pose_is_skipped_without_a_joint_capable_driver(tmp_path, monkeypatch):
+    """回不去的目标不如不给:按钮该保持禁用,而不是点了才失败。"""
+    _pose_session(monkeypatch, tmp_path, driver=SimpleNamespace(), joints=[1.0, 2.0])
+    engine = _engine(tmp_path)
+
+    engine._emit_start_pose(run_engine_module.get_body("piper").build_real_session({}))
+
+    assert engine.drain() == []
+
+
+def test_start_pose_is_skipped_without_joint_readings(tmp_path, monkeypatch):
+    _pose_session(monkeypatch, tmp_path, driver=_JointDriver(), joints=None)
+    engine = _engine(tmp_path)
+
+    engine._emit_start_pose(run_engine_module.get_body("piper").build_real_session({}))
+
+    assert engine.drain() == []
+
+
+def test_return_to_start_drives_joints_and_never_calls_home(tmp_path, monkeypatch):
+    """``home_use_init_pose`` 的本体新连接时 home 就是当前姿态,home() 会原地不动。"""
+    driver = _JointDriver()
+    seen = _pose_session(monkeypatch, tmp_path, driver=driver, joints=[1.0, 2.0])
+    engine = _engine(tmp_path)
+
+    engine.start_return_to([10.0, 20.0])
+    engine.join(timeout=5)
+
+    assert driver.moved == [[10.0, 20.0]]
+    assert driver.homed == 0
+    assert seen["include_sidecars"] is False, "回位只动机械臂,不该拉起检测服务"
+    assert _tags(engine.drain()) == ["pose_return_started", "pose_return_finished"]
+
+
+def test_return_to_start_reports_a_rejected_move(tmp_path, monkeypatch):
+    _pose_session(monkeypatch, tmp_path, driver=_JointDriver(fail=True), joints=[1.0, 2.0])
+    engine = _engine(tmp_path)
+
+    engine.start_return_to([10.0, 20.0])
+    engine.join(timeout=5)
+
+    finished = engine.drain()[-1][1]
+    assert finished["ok"] is False
+    assert "out of soft limits" in finished["error"]
+
+
+def test_return_to_start_is_refused_while_a_run_is_in_flight(tmp_path, monkeypatch):
+    driver = _JointDriver()
+    _pose_session(monkeypatch, tmp_path, driver=driver, joints=[1.0, 2.0])
+    engine = _engine(tmp_path)
+    engine._thread = SimpleNamespace(is_alive=lambda: True)
+
+    engine.start_return_to([10.0, 20.0])
+
+    assert driver.moved == []
+
+
 def test_strip_vision_services_removes_detector_and_camera():
     cfg = {
         "api_servers": [{"_target_": "x.grounding_dino_sam2_server.main"}],

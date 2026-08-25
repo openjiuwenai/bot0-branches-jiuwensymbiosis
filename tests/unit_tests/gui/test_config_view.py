@@ -29,6 +29,19 @@ def page(tmp_path, monkeypatch):
     return SimpleNamespace(view=view, body_key=body_key, saved=saved)
 
 
+def test_reveal_field_switches_to_the_group_that_holds_it(page):
+    """别的页面把「这项没填」做成可点跳转,落点得是那一栏所在的分组,不是表单第一页。"""
+    page.view._form_tabs.set_value("基础")
+
+    assert page.view.reveal_field("env.cfg.low_level.camera_serial")
+    assert page.view._form_tabs.value == "机器人参数"
+
+
+def test_reveal_field_reports_paths_the_form_does_not_expose(page):
+    """只在「原始 YAML」里能改的字段没有输入框,调用方据此改口而不是静默跳错地方。"""
+    assert not page.view.reveal_field("env.cfg.low_level.not_a_form_field")
+
+
 def test_save_dialog_prefills_local_name_and_warns_on_overwrite(page):
     page.view._open_save()
     assert page.view._save_name.value == f"{page.body_key}.local"

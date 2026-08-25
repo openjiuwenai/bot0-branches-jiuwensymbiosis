@@ -56,6 +56,7 @@ class Layout:
         about = self._build_about_dialog()
         self._quit_dialog = self._build_quit_dialog()
         self._restart_dialog = self._build_restart_dialog()
+        self._return_dialog = self._build_return_dialog()
         self._bye_dialog = self._build_bye_dialog()
         self._restarting_dialog = self._build_restarting_dialog()
         with ui.header().classes("items-center justify-between"):
@@ -83,9 +84,15 @@ class Layout:
                     on_config_saved=self._home.reload_configs,
                 )
             with ui.tab_panel(self._run_tab):
-                self._run = RunView(on_stop=self._stop_run, on_fix=self._state.apply_fix, on_rerun=self._rerun)
+                self._run = RunView(
+                    on_stop=self._stop_run,
+                    on_fix=self._state.apply_fix,
+                    on_rerun=self._rerun,
+                    on_start_pose=self._remember_start_pose,
+                    on_return_to_start=self._confirm_return_to_start,
+                )
             with ui.tab_panel(self._tools_tab):
-                self._tools = ToolsView(self._state)
+                self._tools = ToolsView(self._state, on_open_config=self._open_config_field)
             with ui.tab_panel(self._history_tab):
                 self._history = HistoryView(self._state.workspace)
             with ui.tab_panel(self._settings_tab):
@@ -165,6 +172,16 @@ class Layout:
             on_confirm=self._do_restart,
         )
 
+    def _build_return_dialog(self) -> ui.dialog:
+        """确认后机械臂自主运动回到本次运行开跑时的姿态。"""
+        return self._confirm_dialog(
+            title="回到起始位？",
+            body="机械臂会自动运动回到本次运行开始时的姿态，请先离开工作区。",
+            confirm_label="回到起始位",
+            confirm_props="color=negative",
+            on_confirm=self._do_return_to_start,
+        )
+
     def _confirm_quit(self) -> None:
         """点「退出」:运行中先拦一下(避免中途杀掉真机任务),否则弹确认框。"""
         if self._state.is_busy():
@@ -188,7 +205,7 @@ class Layout:
         from jiuwensymbiosis.gui.app import spawn_replacement
 
         # 释放相机/CAN,免得接替进程重连硬件时被占用。
-        self._tools.stop_preview()
+        self._tools.release_hardware()
         self._restart_dialog.close()
         self._restarting_dialog.open()
         spawn_replacement()
@@ -219,7 +236,7 @@ class Layout:
         val = getattr(e, "value", None)
         if val != _TOOLS:
             # 离开工具页即请求停掉相机预览,释放 RealSense/CAN,免得正常运行时相机被占用。
-            self._tools.stop_preview(wait=False)
+            self._tools.release_hardware(wait=False)
         if val == _HISTORY:
             self._history.set_workspace(self._state.workspace)
         elif val == _CONFIG:
@@ -235,6 +252,22 @@ class Layout:
         self._state.current_task = task_key
         self._sync_config_view()
         self._goto(self._config_tab)
+
+    def _open_config_field(self, path: str) -> None:
+        """跳到「配置」页并停在某个字段上(工具页「这项没填」类提示的落点)。
+
+        必须自己先 ``_sync_config_view()``:``_on_nav`` 认的是浏览器传回的标签**名**,而
+        ``_goto`` 传的是 Tab 对象,那几条分支都不会命中,表单不会被重建。定位放在切标签
+        之后,这样 ``_on_nav`` 日后改成认得 Tab 对象了也不会把落点冲掉。
+        """
+        if self._state.current_body is None or self._state.current_task is None:
+            ui.notify("请先在主页选择一个本体与任务,再去改配置。", type="warning")
+            self._goto(self._home_tab)
+            return
+        self._sync_config_view()
+        self._goto(self._config_tab)
+        if not self._config.reveal_field(path):
+            ui.notify(f"「配置」页的表单里没有 {path},请在「原始 YAML」里改。", type="warning")
 
     def _sync_config_view(self) -> None:
         """按当前选中本体+任务重建配置表单。无选中本体/任务则不动。"""
@@ -265,8 +298,11 @@ class Layout:
             ui.notify("请先在主页选择一个本体。", type="warning")
             self._goto(self._home_tab)
             return
-        # 开始正常运行前,确保工具页的相机预览已停止并释放硬件(阻塞等待,否则相机被占用)。
-        self._tools.stop_preview()
+        # 开始正常运行前,确保工具页已放开相机与机械臂(阻塞等待)。放不开就不开跑:标定的
+        # 自动采集阶段中途停不下来,硬上会变成两边同时占相机、同时对机械臂下指令。
+        if not self._tools.release_hardware():
+            ui.notify("「工具」页还在占用相机与机械臂，等它结束后再运行。", type="negative")
+            return
         self._state.current_task = task_key
         # 真机运行前先把已下好的本地视觉模型喂给检测器(避免它去 huggingface.co 联网下载
         # 933MB 卡住);找不到就直接展示「错误诊断」引导用户定位/换镜像,而非空跑到超时。
@@ -295,6 +331,39 @@ class Layout:
         self._state.engine = fresh
         self._goto(self._run_tab)
         self._run.attach(fresh)
+
+    # ------------------------------------------------------------------ 回到起始位
+    def _remember_start_pose(self, joints: list[float]) -> None:
+        """引擎报来本次开跑时的关节角,连同当前本体/配置一起记下。"""
+        body_key = self._state.current_body
+        if body_key is not None and joints:
+            self._state.remember_start_pose(body_key, joints)
+
+    def _confirm_return_to_start(self) -> None:
+        """点「回到起始位」:先把拦不住的情况说清楚,能走再弹确认框。"""
+        if self._state.is_busy():
+            ui.notify("有任务正在运行，请先停止再回位。", type="warning")
+            return
+        if self._state.start_pose_joints() is None:
+            ui.notify("换过本体或配置文件后，上次的起始姿态就不适用了；重新跑一次即可。", type="warning")
+            return
+        self._return_dialog.open()
+
+    def _do_return_to_start(self) -> None:
+        """确认回位:先要回硬件,再借运行引擎跑一次纯关节运动。"""
+        self._return_dialog.close()
+        joints = self._state.start_pose_joints()
+        engine = self._state.engine
+        if joints is None or engine is None:
+            return
+        # 与开跑同一道门:回位同样要独占机械臂。
+        if not self._tools.release_hardware():
+            ui.notify("「工具」页还在占用机械臂，等它结束后再回位。", type="negative")
+            return
+        # 沿用刚跑完那个引擎实例,而不是 clone():运行页的事件轮询盯的就是它,换一个
+        # 实例回位进度就送不到界面上了。回位线程不看运行留下的停止标志与取消 token。
+        self._goto(self._run_tab)
+        engine.start_return_to(joints)
 
     def _set_workspace(self, workspace: str) -> None:
         self._state.workspace = workspace

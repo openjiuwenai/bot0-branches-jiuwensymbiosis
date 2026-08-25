@@ -33,6 +33,10 @@ class AppState:
         # 主页「配置文件」下拉选中的本体配置绝对路径;None = 用本体的默认配置。
         self.current_config_file: str | None = None
         self.engine: RunEngine | None = None
+        # 上次开跑时机械臂所在的关节角,连同它属于哪个 (本体, 配置文件) 一起记。
+        # 供运行页「回到起始位」;换本体或换配置即失效——拿 A 配置的姿态喂 B 配置,
+        # 关节数与限位都可能对不上。
+        self._start_pose: dict[str, Any] | None = None
         # 配置属**本体**(与任务无关),按 (本体, 任务, 配置文件) 缓存:同一组合共享一份可编辑
         # 配置,换本体/换配置文件则各自独立(本体无关任务在不同本体下用各自本体的配置)。
         self._configs: dict[tuple[str, str, str], ConfigModel] = {}
@@ -92,6 +96,25 @@ class AppState:
 
     def is_busy(self) -> bool:
         return self.engine is not None and self.engine.is_running()
+
+    def remember_start_pose(self, body_key: str, joints: list[float]) -> None:
+        """记下某次运行开跑时的关节角(引擎的 ``start_pose`` 事件调用)。"""
+        self._start_pose = {
+            "body": body_key,
+            "config_file": self.current_config_file or "",
+            "joints": [float(v) for v in joints],
+        }
+
+    def start_pose_joints(self) -> list[float] | None:
+        """当前 (本体, 配置文件) 下可用的开跑姿态;换了本体/配置即返回 None。"""
+        snapshot = self._start_pose
+        if snapshot is None or self.current_body is None:
+            return None
+        if snapshot["body"] != self.current_body:
+            return None
+        if snapshot["config_file"] != (self.current_config_file or ""):
+            return None
+        return list(snapshot["joints"])
 
     def prime_detector_models(self, body_key: str, task_key: str) -> list[str]:
         """真机运行前把已下好的本地视觉模型目录写进检测器配置项,返回仍缺失的模型名。

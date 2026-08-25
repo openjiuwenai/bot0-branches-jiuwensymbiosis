@@ -39,6 +39,8 @@ class ConfigView:
         self._fields: tuple[FieldSpec, ...] = ()
         self._yaml: Any = None
         self._body_key = ""
+        self._form_tabs: Any = None
+        self._controls: dict[str, Any] = {}
         with ui.column().classes("w-full gap-2"):
             self._title = ui.label("").classes("text-lg font-bold")
             self._form_host = ui.column().classes("w-full")
@@ -59,16 +61,30 @@ class ConfigView:
         self._build_form()
         self._refresh_warnings()
 
+    def reveal_field(self, path: str) -> bool:
+        """切到某字段所在的分组并聚焦它;该字段不在本体表单里(只能走原始 YAML)则返回 False。"""
+        spec = next((s for s in self._fields if s.path == path), None)
+        if spec is None or self._form_tabs is None:
+            return False
+        self._form_tabs.set_value(spec.group)
+        control = self._controls.get(path)
+        if control is not None:
+            # 标签面板只挂载当前那一页,刚切过去的这一帧控件还不在 DOM 里,聚焦得等它挂上。
+            ui.timer(0.2, lambda: control.run_method("focus"), once=True)
+        return True
+
     # ------------------------------------------------------------------ 表单
     def _build_form(self, *, active: str | None = None) -> None:
         """重建表单;``active`` 指定重建后停留的标签(缺省回到第一个分组)。"""
         self._form_host.clear()
+        self._controls.clear()
         groups = [g for g in GROUP_ORDER if any(s.group == g for s in self._fields)]
         with self._form_host:
             with ui.tabs().classes("w-full") as tabs:
                 for group in groups:
                     ui.tab(group)
                 ui.tab(_YAML_TAB)
+            self._form_tabs = tabs
             first = active or (groups[0] if groups else _YAML_TAB)
             with ui.tab_panels(tabs, value=first, on_change=self._on_tab).classes("w-full"):
                 for group in groups:
@@ -88,6 +104,7 @@ class ConfigView:
     def _build_group(self, group: str) -> None:
         for spec in [s for s in self._fields if s.group == group]:
             control = self._make_control(spec)
+            self._controls[spec.path] = control
             if spec.help:
                 control.tooltip(spec.help)
 
