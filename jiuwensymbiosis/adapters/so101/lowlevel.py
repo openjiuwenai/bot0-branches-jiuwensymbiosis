@@ -25,7 +25,8 @@ import copy
 import logging
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -41,6 +42,7 @@ from jiuwensymbiosis.adapters.so101.geometry import (
     pose_mm_deg_to_matrix_m,
     position_error_mm,
 )
+from jiuwensymbiosis.env.protocol import HandGuidingRecoveryError
 from jiuwensymbiosis.utils import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - import-only typing helpers
@@ -655,17 +657,32 @@ class So101Driver:
         self._require_connected()
         self._robot.bus.disable_torque(list(ARM_JOINT_ORDER))
 
+    def disable_all_torque(self) -> None:
+        """Disable every motor, including the gripper — whatever it holds will drop."""
+        self._require_connected()
+        self._robot.bus.disable_torque()
+
     def enable_arm_torque(self) -> None:
         """Enable the five arm joints while leaving gripper torque unchanged."""
         self._require_connected()
         self._robot.bus.enable_torque(list(ARM_JOINT_ORDER))
 
-    def preset_current_joint_goal(self) -> None:
-        """Write the observed arm joints as goals without enabling torque."""
+    def preset_current_joint_goal(self, *, include_end_effector: bool = False) -> None:
+        """Write the observed joints as goals without enabling torque.
+
+        The gripper is only included on request: a motor still under torque has
+        not moved, so rewriting its goal is noise, whereas one that was released
+        and hand-moved would otherwise snap back to its pre-release goal.
+        """
         self._require_connected()
         joint_array = np.asarray(self.get_angles(), dtype=float)
         self._validate_joint_vector(joint_array.tolist(), label="current arm joints")
         requested = _arm_action(joint_array)
+        if include_end_effector:
+            gripper = float(self.get_gripper_position())
+            if not _is_finite(gripper):
+                raise ValueError(f"current gripper position must be finite, got {gripper!r}.")
+            requested["gripper.pos"] = gripper
         actual = self._send_action(requested)
         self._require_action_match(requested, actual, label="preset current joint goal")
 
@@ -673,6 +690,63 @@ class So101Driver:
         """Enable torque for every motor, including the gripper."""
         self._require_connected()
         self._robot.bus.enable_torque()
+
+    def release_for_hand_guiding(self, *, include_end_effector: bool = False) -> None:
+        """Drop torque so a human can pose the robot by hand."""
+        if include_end_effector:
+            self.disable_all_torque()
+            _logger.warning("SO-101 torque disabled on every motor — the gripper will drop what it holds.")
+        else:
+            self.disable_arm_torque()
+            _logger.warning("SO-101 arm torque disabled; gripper torque remains on — support the elbow.")
+
+    def restore_torque_at_current_pose(
+        self,
+        *,
+        include_end_effector: bool = False,
+        cause: BaseException | None = None,
+    ) -> None:
+        """Preset the goal to where the robot now is, then re-energise.
+
+        The preset must come first: enabling torque against a stale goal snaps the
+        robot back to wherever it was last told to go. Either step failing leaves it
+        limp, which is the one failure the operator has to react to physically —
+        hence the dedicated error type. ``cause`` chains an already-in-flight
+        exception so the original failure stays the root of the traceback.
+        """
+        try:
+            self.preset_current_joint_goal(include_end_effector=include_end_effector)
+        except Exception as exc:
+            _logger.error("SO-101 failed to preset the joint goal after hand guiding: %s", exc)
+            raise HandGuidingRecoveryError(
+                "preset_current_joint_goal failed after hand guiding; torque was not re-enabled. "
+                "Support the arm and home it manually before continuing."
+            ) from (cause or exc)
+        try:
+            self.restore_all_torque()
+        except Exception as exc:
+            _logger.error("SO-101 failed to restore torque after hand guiding: %s", exc)
+            raise HandGuidingRecoveryError(
+                "restore_all_torque failed after hand guiding. Support the arm and check the motor bus."
+            ) from (cause or exc)
+
+    @contextmanager
+    def hand_guiding(self, *, include_end_effector: bool = False) -> Iterator[None]:
+        """Release torque for hand posing and restore it without a stale-goal jump.
+
+        Callers may re-energise and release again mid-context (letting the operator
+        rest) via :meth:`restore_torque_at_current_pose` / :meth:`release_for_hand_guiding`;
+        the exit path repeats the restore, which is a no-op when torque is already on.
+        """
+        self.release_for_hand_guiding(include_end_effector=include_end_effector)
+        body_error: BaseException | None = None
+        try:
+            yield
+        except BaseException as exc:
+            body_error = exc
+            raise
+        finally:
+            self.restore_torque_at_current_pose(include_end_effector=include_end_effector, cause=body_error)
 
     def get_gripper_position(self) -> float:
         """Return the gripper target in 0..100 % (native SO-101 units)."""
@@ -854,16 +928,21 @@ class So101Driver:
         self._reset_servo_plan()
         start_q = np.asarray(self.get_angles(), dtype=float)
         target_q = np.asarray(self._cfg.home_joints_deg, dtype=float)
+        # Homing is the escape route from a drooped-below-the-floor pose; it must
+        # not be the thing the floor check blocks.
+        z_floor_override = self._escape_z_floor(start_q)
         waypoints = self._joint_waypoints(start_q, target_q)
         for index, waypoint in enumerate(waypoints, start=1):
             self._validate_joint_waypoint(
                 waypoint,
                 label=f"{mode}-home waypoint {index}/{len(waypoints)}",
+                z_floor_override=z_floor_override,
             )
         self._dispatch_prevalidated_waypoints(
             waypoints,
             target_q,
             timeout_s=None,
+            z_floor_override=z_floor_override,
         )
 
     def move_joint_blocking(
@@ -897,6 +976,7 @@ class So101Driver:
 
         current = np.asarray(self.get_angles(), dtype=float)
         target = np.asarray(q, dtype=float)
+        z_floor_override = self._escape_z_floor(current)
         try:
             waypoints = self._joint_waypoints(current, target)
 
@@ -904,11 +984,20 @@ class So101Driver:
             # Joint limits alone are insufficient: FK can put a legal joint
             # vector below the Z floor or outside the configured XY work area.
             for index, wp in enumerate(waypoints, start=1):
-                self._validate_joint_waypoint(wp, label=f"joint waypoint {index}/{len(waypoints)}")
+                self._validate_joint_waypoint(
+                    wp,
+                    label=f"joint waypoint {index}/{len(waypoints)}",
+                    z_floor_override=z_floor_override,
+                )
         except ValueError as exc:
             raise So101PreDispatchError(str(exc)) from exc
 
-        self._dispatch_prevalidated_waypoints(waypoints, target, timeout_s=timeout_s)
+        self._dispatch_prevalidated_waypoints(
+            waypoints,
+            target,
+            timeout_s=timeout_s,
+            z_floor_override=z_floor_override,
+        )
 
     def _send_action(self, action: dict[str, float]) -> dict[str, float]:
         """Dispatch ``action`` and record the *actual* target LeRobot applied.
@@ -1036,6 +1125,7 @@ class So101Driver:
         drift_abort_samples: int,
         context: str,
         max_command_offset_deg: float | None = None,
+        z_floor_override: float | None = None,
     ) -> tuple[np.ndarray, float]:
         """Return the next bounded endpoint command for blocking or fast motion.
 
@@ -1097,12 +1187,14 @@ class So101Driver:
             self._validate_joint_waypoint(
                 desired,
                 label=f"{context} over-compensate desired",
+                z_floor_override=z_floor_override,
             )
             delta = desired - state.last_command
             command = state.last_command + np.clip(delta, -float(max_step_deg), float(max_step_deg))
             self._validate_joint_waypoint(
                 command,
                 label=f"{context} over-compensate waypoint",
+                z_floor_override=z_floor_override,
             )
         except ValueError as exc:
             _logger.warning(
@@ -1120,6 +1212,8 @@ class So101Driver:
         target_q: np.ndarray,
         actual_q: np.ndarray,
         last_command_q: np.ndarray,
+        *,
+        z_floor_override: float | None = None,
     ) -> np.ndarray:
         """Return one safe local command whose only Cartesian objective is +Z.
 
@@ -1174,11 +1268,19 @@ class So101Driver:
             if np.allclose(candidate, last_command, atol=1e-9, rtol=0.0):
                 continue
             try:
-                self._validate_joint_waypoint(candidate, label="Z-only lift command")
+                self._validate_joint_waypoint(
+                    candidate,
+                    label="Z-only lift command",
+                    z_floor_override=z_floor_override,
+                )
                 candidate_pose = matrix_m_to_pose_mm_deg(
                     np.asarray(self._kin.forward_kinematics(candidate), dtype=float)
                 )
-                self._check_cartesian_bounds(candidate_pose, label="Z-only lift command FK")
+                self._check_cartesian_bounds(
+                    candidate_pose,
+                    label="Z-only lift command FK",
+                    z_floor_override=z_floor_override,
+                )
             except ValueError:
                 continue
             if candidate_pose.z > command_pose.z + 1e-4:
@@ -1205,6 +1307,7 @@ class So101Driver:
         timeout_s: float | None,
         cartesian_target_matrix: np.ndarray | None = None,
         cartesian_start_matrix: np.ndarray | None = None,
+        z_floor_override: float | None = None,
     ) -> None:
         """Stream pre-validated joint waypoints, then settle to ``final_target``.
 
@@ -1248,7 +1351,11 @@ class So101Driver:
             if period > 0:
                 self._sleep(period)
             observed = np.asarray(self.get_angles(), dtype=float)
-            self._validate_joint_waypoint(observed, label="waypoint tracking")
+            self._validate_joint_waypoint(
+                observed,
+                label="waypoint tracking",
+                z_floor_override=z_floor_override,
+            )
 
         # Final settle gets its own complete timeout budget.  A long waypoint
         # stream must not consume the time reserved for endpoint convergence.
@@ -1299,7 +1406,11 @@ class So101Driver:
                 raise TimeoutError(f"SO-101 final target did not settle within the move timeout ({settle_timeout_s}s).")
             actual = np.asarray(self.get_angles(), dtype=float)
             last_actual = actual
-            self._validate_joint_waypoint(actual, label="settle tracking")
+            self._validate_joint_waypoint(
+                actual,
+                label="settle tracking",
+                z_floor_override=z_floor_override,
+            )
             err = float(np.max(np.abs(actual - last_wp)))
             _, _, z_error_mm = self._settle_metrics(
                 last_wp,
@@ -1375,6 +1486,7 @@ class So101Driver:
                         last_wp,
                         actual,
                         endpoint_state.last_command,
+                        z_floor_override=z_floor_override,
                     )
                 except (ValueError, _ZOnlyLiftUnavailable) as exc:
                     self._record_settle_result(
@@ -1399,6 +1511,7 @@ class So101Driver:
                         integral_limit_deg=overcomp_integral_limit,
                         drift_abort_samples=drift_cap,
                         context="settle",
+                        z_floor_override=z_floor_override,
                     )
                 except _EndpointCompensationDrift as exc:
                     self._record_settle_result(
@@ -1907,7 +2020,14 @@ class So101Driver:
         except (TypeError, ValueError) as exc:
             raise TypeError(f"SO-101 servo pose contains non-numeric fields: {pose!r}.") from exc
 
-    def _validate_ik_solution(self, q: np.ndarray, desired_matrix: np.ndarray, *, label: str) -> None:
+    def _validate_ik_solution(
+        self,
+        q: np.ndarray,
+        desired_matrix: np.ndarray,
+        *,
+        label: str,
+        z_floor_override: float | None = None,
+    ) -> None:
         """Validate an IK solution against the requested pose and safety envelope."""
         self._validate_joint_vector(np.asarray(q, dtype=float).tolist(), label=label)
         self._check_joint_limits(np.asarray(q, dtype=float), label=label)
@@ -1931,7 +2051,7 @@ class So101Driver:
                     f"{label}: IK orientation residual {ori_err:.3f} deg exceeds "
                     f"tolerance {self._cfg.ik_orientation_tolerance_deg} deg."
                 )
-        self._check_cartesian_bounds(fk_pose, label=f"{label} FK")
+        self._check_cartesian_bounds(fk_pose, label=f"{label} FK", z_floor_override=z_floor_override)
 
     def _dispatch_pose_move(
         self,
@@ -1959,12 +2079,21 @@ class So101Driver:
         desired_matrix = np.asarray(pose_mm_deg_to_matrix_m(pose), dtype=float)
         current_q = np.asarray(self.get_angles(), dtype=float)
         start_matrix = np.asarray(self._kin.forward_kinematics(current_q), dtype=float)
+        # The commanded target was just checked against the unrelaxed floor, so
+        # the path may pass through the pose the arm already occupies.
+        z_floor_override = self._escape_z_floor(current_q)
 
         # 2. Plan the SE(3) waypoint path via the seed chain (one IK per step,
         #    seeded by the previous step's solution). All residuals, limits and
         #    Cartesian bounds are checked here, before any send_action.
         try:
-            ik_waypoints = self._plan_cartesian_waypoints(current_q, start_matrix, desired_matrix, pose)
+            ik_waypoints = self._plan_cartesian_waypoints(
+                current_q,
+                start_matrix,
+                desired_matrix,
+                pose,
+                z_floor_override=z_floor_override,
+            )
         except ValueError as exc:
             raise So101PreDispatchError(str(exc)) from exc
 
@@ -1975,6 +2104,7 @@ class So101Driver:
             timeout_s=timeout_s,
             cartesian_target_matrix=desired_matrix,
             cartesian_start_matrix=start_matrix,
+            z_floor_override=z_floor_override,
         )
         return np.asarray(ik_waypoints[-1], dtype=float)
 
@@ -2023,7 +2153,11 @@ class So101Driver:
             # would break a limit means the target genuinely needs an
             # out-of-bounds joint; stop at the current safe real pose.
             try:
-                self._validate_joint_waypoint(cmd_q, label=f"convergence iter {n} over-command")
+                self._validate_joint_waypoint(
+                    cmd_q,
+                    label=f"convergence iter {n} over-command",
+                    z_floor_override=self._escape_z_floor(q_actual),
+                )
             except ValueError as exc:
                 _logger.warning(
                     "SO-101 pose convergence iter %d: over-command rejected (%s); "
@@ -2092,6 +2226,8 @@ class So101Driver:
         start_matrix: np.ndarray,
         target_matrix: np.ndarray,
         target_pose: So101Pose,
+        *,
+        z_floor_override: float | None = None,
     ) -> list[np.ndarray]:
         """Plan a Cartesian SE(3) path as a list of joint-space IK solutions.
 
@@ -2148,7 +2284,7 @@ class So101Driver:
 
         def validate_waypoint(q: np.ndarray, matrix: np.ndarray, label: str) -> None:
             """Validate a waypoint; raise on failure (no silent skip)."""
-            self._validate_ik_solution(q, matrix, label=label)
+            self._validate_ik_solution(q, matrix, label=label, z_floor_override=z_floor_override)
 
         def position_residual_for_valid_joints(q: np.ndarray, matrix: np.ndarray, label: str) -> float:
             """Return residual only after non-position joint safety checks pass."""
@@ -2257,7 +2393,48 @@ class So101Driver:
             if not (lo <= float(q[i]) <= hi):
                 raise ValueError(f"{label}: {name}={float(q[i])} out of soft limits [{lo}, {hi}].")
 
-    def _validate_joint_waypoint(self, q: np.ndarray, *, label: str) -> None:
+    def _escape_z_floor(self, start_q: np.ndarray) -> float | None:
+        """Return the relaxed Z floor for a motion that starts below the floor.
+
+        The Z floor stops the arm being driven *into* the table; it must not trap
+        an arm that gravity droop already left underneath it. When the start pose
+        violates the floor, path and tracking checks accept poses no lower than
+        that start pose, so climbing out stays legal while descending further
+        never is. ``None`` means the start is legal and the configured floor
+        stands unchanged.
+        """
+        configured = float(self._cfg.z_min_safe_mm)
+        try:
+            start_matrix = np.asarray(
+                self._kin.forward_kinematics(np.asarray(start_q, dtype=float)),
+                dtype=float,
+            )
+            start_z = matrix_m_to_pose_mm_deg(start_matrix).z
+        except Exception as exc:
+            _logger.warning(
+                "[SO-101] escape Z floor unavailable (start FK failed: %s); keeping z_min_safe=%g mm.",
+                exc,
+                configured,
+            )
+            return None
+        if not _is_finite(start_z) or start_z >= configured:
+            return None
+        _logger.warning(
+            "[SO-101] start pose z=%.3f mm is already below z_min_safe=%g mm; this motion's path and "
+            "tracking checks accept z >= %.3f mm so the arm can climb out. Descending further stays rejected.",
+            start_z,
+            configured,
+            start_z,
+        )
+        return float(start_z)
+
+    def _validate_joint_waypoint(
+        self,
+        q: np.ndarray,
+        *,
+        label: str,
+        z_floor_override: float | None = None,
+    ) -> None:
         """Validate one joint command, including its FK Cartesian envelope.
 
         This is intentionally called before dispatch for both normal
@@ -2271,9 +2448,15 @@ class So101Driver:
         self._check_joint_limits(q_arr, label=label)
         fk_matrix = np.asarray(self._kin.forward_kinematics(q_arr), dtype=float)
         fk_pose = matrix_m_to_pose_mm_deg(fk_matrix)
-        self._check_cartesian_bounds(fk_pose, label=f"{label} FK")
+        self._check_cartesian_bounds(fk_pose, label=f"{label} FK", z_floor_override=z_floor_override)
 
-    def _check_cartesian_bounds(self, pose: So101Pose, *, label: str) -> None:
+    def _check_cartesian_bounds(
+        self,
+        pose: So101Pose,
+        *,
+        label: str,
+        z_floor_override: float | None = None,
+    ) -> None:
         """Second-layer Z-floor/ceiling + XY-bound check the driver runs before sending.
 
         SafetyRail checks the *target* at the tool layer, but a caller can bypass
@@ -2282,10 +2465,21 @@ class So101Driver:
         boundary check before actually dispatching. Applied to both the commanded
         target and the IK solution's FK result, and to every interpolated
         waypoint along the path.
+
+        ``z_floor_override`` lowers the floor (and the table clearance derived
+        from it) to a pose the arm is already at — see :meth:`_escape_z_floor`.
+        It is passed only for path/tracking checks, never for a commanded goal,
+        so a target below the configured floor stays rejected either way.
         """
-        z_floor = self._cfg.z_min_safe_mm
+        configured_floor = float(self._cfg.z_min_safe_mm)
+        z_floor = configured_floor if z_floor_override is None else min(configured_floor, float(z_floor_override))
         if pose.z < z_floor:
-            raise ValueError(f"{label}: z={pose.z:.3f} mm below driver z_min_safe={z_floor} mm.")
+            bound = (
+                f"driver z_min_safe={configured_floor:g} mm"
+                if z_floor_override is None
+                else (f"the start-pose escape floor {z_floor:.3f} mm (driver z_min_safe={configured_floor:g} mm)")
+            )
+            raise ValueError(f"{label}: z={pose.z:.3f} mm below {bound}.")
         z_ceil = getattr(self._cfg, "z_max_safe_mm", None)
         if z_ceil is not None and pose.z > z_ceil:
             raise ValueError(f"{label}: z={pose.z:.3f} mm above driver z_max_safe={z_ceil} mm.")
@@ -2294,6 +2488,11 @@ class So101Driver:
             payload_offset = float(self._cfg.payload_protrusion_mm) if self._holding_payload else 0.0
             lowest_z = pose.z - float(self._cfg.gripper_lowest_offset_mm) - payload_offset
             lowest_floor = float(table_z) + float(self._cfg.minimum_floor_margin_mm)
+            if z_floor_override is not None:
+                # Same escape rule: the clearance the arm already sits at becomes
+                # the bound, so it may climb out but never sink further.
+                start_lowest_z = float(z_floor_override) - float(self._cfg.gripper_lowest_offset_mm) - payload_offset
+                lowest_floor = min(lowest_floor, start_lowest_z)
             if lowest_z < lowest_floor:
                 raise ValueError(
                     f"{label}: effective lowest z={lowest_z:.3f} mm below table clearance floor "

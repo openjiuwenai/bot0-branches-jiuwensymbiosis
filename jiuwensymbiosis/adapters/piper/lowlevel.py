@@ -236,12 +236,27 @@ class PiperLowLevel:
         logger.info("[Piper] CAN %s connected + arm/gripper enabled.", can_port)
 
         # --- calibration / workspace anchor
+        # A calibration JSON always carries the camera geometry; its base-frame
+        # ``object`` anchor is optional (schema-2 publications omit it). Home,
+        # z_min_safe and the tip-vs-flange pose convention follow the ANCHOR, not
+        # the file: without one they come from config, and the camera transform
+        # still loads.
         self._calib: dict[str, Any] | None = None
         self._tf_flange_cam: np.ndarray | None = None
+        calib_object_xyz: Any | None = None
         if calib_path is not None:
             self._calib = load_calibration(calib_path)
             self._tf_flange_cam = self._calib["T_flange_cam"]["matrix_4x4"]
-            calib_object_xyz = self._calib["object"]["xyz_base_mm"]
+            anchor = self._calib.get("object")
+            calib_object_xyz = None if anchor is None else anchor["xyz_base_mm"]
+            if calib_object_xyz is None:
+                logger.warning(
+                    "[Piper] calibration %s carries no object anchor: home and z_min_safe come from "
+                    "config, and poses are FLANGE-frame (an anchored calibration would make them "
+                    "TIP-frame). Check home_pose_xyzrxryrz_mm_deg / z_min_safe_mm / tool_offset_mm.",
+                    calib_path,
+                )
+        if calib_object_xyz is not None:
             self._calib_object_pose = PiperPose(
                 x=float(calib_object_xyz[0]),
                 y=float(calib_object_xyz[1]),
@@ -265,7 +280,11 @@ class PiperLowLevel:
             )
         else:
             if home_pose_xyzrxryrz_mm_deg is None or len(home_pose_xyzrxryrz_mm_deg) != 6:
-                raise ValueError("[Piper] either calib_path or home_pose_xyzrxryrz_mm_deg (6-tuple) must be set")
+                raise ValueError(
+                    "[Piper] no calibration object anchor is available, so home must come from "
+                    "config: set home_pose_xyzrxryrz_mm_deg (6-tuple), or point calib_path at a "
+                    "calibration JSON carrying object.xyz_base_mm."
+                )
             if z_min_safe_mm is None:
                 z_min_safe_mm = 50.0
             self._home_pose = PiperPose(*[float(v) for v in home_pose_xyzrxryrz_mm_deg])
@@ -296,8 +315,9 @@ class PiperLowLevel:
         if init_pose is None:
             raise RuntimeError("[Piper] GetArmEndPoseMsgs() failed during init.")
         self._init_pose = init_pose  # FLANGE frame
-        if self._calib is not None:
-            # Inherit live orientation into the home / calibration-object poses.
+        if calib_object_xyz is not None:
+            # Inherit live orientation into the anchor-derived home / object poses
+            # (both were built from a translation-only anchor above).
             self._home_pose = PiperPose(
                 self._home_pose.x,
                 self._home_pose.y,

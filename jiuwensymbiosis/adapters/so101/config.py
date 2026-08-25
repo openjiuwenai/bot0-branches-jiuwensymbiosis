@@ -18,7 +18,7 @@ import math
 import os
 from dataclasses import InitVar, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import yaml
@@ -409,6 +409,10 @@ class So101Config:
     camera_serial: str | None = None
     camera_resolution: tuple[int, int] = (640, 480)
     camera_fps: int = 30
+    # Camera topology, and the single authority the calibration subsystem reads
+    # to pick its output frame (``T_base_cam``). SO-101's camera is desk-fixed,
+    # so eye_in_hand is not a supported value.
+    camera_mount: Literal["eye_to_hand"] = "eye_to_hand"
     # Hand-eye calibration JSON (schema-2, ``T_base_cam`` field). None -> no
     # calibration; vision tools raise at call time (fail-closed, like piper).
     calib_path: str | None = None
@@ -562,6 +566,7 @@ class So101Config:
                 "calibration": "calib_path",
                 "resolution": "camera_resolution",
                 "fps": "camera_fps",
+                "mount": "camera_mount",
             },
             "grasp": {
                 "z_offset_mm": "grasp_z_offset_mm",
@@ -616,6 +621,12 @@ class So101Config:
             if not isinstance(cr, (list, tuple)) or len(cr) != 2:
                 raise ValueError(f"So101Config: camera_resolution must be a 2-element list, got {cr!r}.")
             kw["camera_resolution"] = (int(cr[0]), int(cr[1]))
+
+        if "camera_mount" in kw and kw["camera_mount"] != "eye_to_hand":
+            raise ValueError(
+                f"So101Config: camera_mount must be 'eye_to_hand' (the camera is desk-fixed), "
+                f"got {kw['camera_mount']!r}."
+            )
 
         if "max_relative_target" in kw and kw["max_relative_target"] is not None:
             mrt = kw["max_relative_target"]

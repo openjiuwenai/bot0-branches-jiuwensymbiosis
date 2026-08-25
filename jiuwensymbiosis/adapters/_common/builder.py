@@ -132,16 +132,19 @@ def make_builder(
       decorate: Optional final-pass callback for storing things on the session.
 
     Returns a callable ``build(cfg)`` that also exposes ``.from_yaml(path)``
-    and ``.from_dict(dict)`` as attributes.
+    and ``.from_dict(dict)`` as attributes. All three take ``include_sidecars``
+    (default True); passing False builds the same env/api without starting any
+    sidecar, which is how calibration connects hardware without paying the
+    detector subprocess's GPU model load.
     """
 
-    def _session_from_cfg(cfg: Any) -> RobotSession:
+    def _session_from_cfg(cfg: Any, *, include_sidecars: bool = True) -> RobotSession:
         env = env_cls(cfg)
         api_kwargs = _resolve_api_kwargs(api_kwargs_from_cfg, cfg)
         api = api_cls(env, **api_kwargs)
 
         sidecar_starters: list[Callable[[], Any]] = []
-        if sidecar_builders:
+        if include_sidecars and sidecar_builders:
             for build in sidecar_builders:
                 cm_or_lambda = build(cfg)
                 if cm_or_lambda is None:
@@ -165,19 +168,19 @@ def make_builder(
             decorate(session, cfg)
         return session
 
-    def build(cfg: Any) -> RobotSession:
+    def build(cfg: Any, *, include_sidecars: bool = True) -> RobotSession:
         """Build a session directly from an in-memory config object."""
-        return _session_from_cfg(cfg)
+        return _session_from_cfg(cfg, include_sidecars=include_sidecars)
 
-    def from_yaml(path: str | Path) -> RobotSession:
+    def from_yaml(path: str | Path, *, include_sidecars: bool = True) -> RobotSession:
         """Build a session from a YAML config file at ``path``."""
         # cfg_cls is a config dataclass w/ from_yaml classmethod (factory contract)
-        return _session_from_cfg(cfg_cls.from_yaml(path))  # type: ignore[attr-defined]
+        return _session_from_cfg(cfg_cls.from_yaml(path), include_sidecars=include_sidecars)  # type: ignore[attr-defined]
 
-    def from_dict(data: dict[str, Any]) -> RobotSession:
+    def from_dict(data: dict[str, Any], *, include_sidecars: bool = True) -> RobotSession:
         """Build a session from an in-memory config ``dict``."""
         # cfg_cls is a config dataclass w/ from_dict classmethod (factory contract)
-        return _session_from_cfg(cfg_cls.from_dict(data))  # type: ignore[attr-defined]
+        return _session_from_cfg(cfg_cls.from_dict(data), include_sidecars=include_sidecars)  # type: ignore[attr-defined]
 
     # function-attribute attachment pattern; mypy can't model fn.__dict__
     build.from_yaml = from_yaml  # type: ignore[attr-defined]

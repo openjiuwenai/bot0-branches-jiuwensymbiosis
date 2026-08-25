@@ -89,6 +89,7 @@ gripper_contact_hold_offset: 1.0  # 接触后仅保留少量闭合预紧，避�
 
 # ==================== 视觉/检测（可选） ====================
 # camera_serial: "123456789"  # 配置后才会暴露 vision.* 工具；null=无相机
+# camera_mount: "eye_to_hand"  # SO-101 相机桌面固定，只接受该值；标定据此选输出坐标系
 # calib_path: "calibration/so101_eye_to_hand.json"
 # 检测服务统一在顶层 api_servers 中配置；未配置时 detector 默认 spawn=False。
 # 无相机时保持整段注释。真机参数放在不提交的本地调试 YAML 中。

@@ -80,9 +80,14 @@ calib = [
 piper-pick-demo = "jiuwensymbiosis.cli:piper_pick_demo"
 jiuwensymbiosis-replay = "jiuwensymbiosis.cli:replay_main"
 jiuwensymbiosis-gui = "jiuwensymbiosis.gui.__main__:main"
+# Mount-neutral collect/auto/replay workflow, plus per-mount facades that share
+# the same application flow but refuse the wrong camera mount.
+jiuwensymbiosis-calibrate-hand-eye = "scripts.calibrate.hand_eye_calib:main"
+jiuwensymbiosis-calibrate-eye-in-hand = "scripts.calibrate.eye_in_hand_calib:main"
+jiuwensymbiosis-calibrate-eye-to-hand = "scripts.calibrate.eye_to_hand_calib:main"
 
 [tool.setuptools.packages.find]
-include = ["jiuwensymbiosis*"]
+include = ["jiuwensymbiosis*", "scripts.calibrate*"]
 
 [tool.setuptools.package-data]
 jiuwensymbiosis = [

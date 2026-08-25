@@ -61,6 +61,7 @@ env:
       gripper_contact_hold_offset: 1.0
 
       # 桌面固定 eye-to-hand RealSense D405；外参状态见文件头。
+      camera_mount: "eye_to_hand"
       camera_serial: "<your-camera-serial>"
       camera_resolution: [640, 480]
       camera_fps: 30

@@ -14,6 +14,7 @@ Covers:
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -167,6 +168,37 @@ class TestSo101EnvJointLimits:
         # Fresh dict each access (stable indexing even if source dict order drifts).
         assert limits1 == limits2
         assert limits1 is not limits2
+
+
+class TestSo101EnvHandGuiding:
+    def test_forwards_the_flag_to_the_driver(self):
+        # A real class, not a MagicMock: runtime_checkable isinstance resolves
+        # members with getattr_static, which cannot see synthesised mock attributes.
+        class _Driver:
+            calls: list[bool] = []
+
+            def hand_guiding(self, *, include_end_effector: bool = False):
+                self.calls.append(include_end_effector)
+                return nullcontext()
+
+        env = _make_env()
+        driver = _Driver()
+        env._inner = driver
+
+        env.hand_guiding(include_end_effector=True)
+
+        assert driver.calls == [True]
+
+    def test_driver_without_the_port_is_rejected_by_name(self):
+        env = _make_env()
+        env._inner = SimpleNamespace()
+
+        with pytest.raises(NotImplementedError, match="HandGuidingDriver"):
+            env.hand_guiding()
+
+    def test_disconnected_env_is_rejected(self):
+        with pytest.raises(RuntimeError, match="not connected"):
+            _make_env().hand_guiding()
 
 
 class TestSo101EnvObservation:
