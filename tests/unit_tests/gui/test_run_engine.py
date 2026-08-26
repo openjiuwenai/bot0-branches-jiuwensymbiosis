@@ -140,19 +140,29 @@ def test_run_frames_are_encoded_data_uris(tmp_path, monkeypatch):
     assert all(isinstance(uri, str) and uri.startswith("data:image/jpeg;base64,") for uri in frames)
 
 
-def test_clone_reuses_same_params_with_independent_config(tmp_path):
+def test_rerun_with_keeps_body_and_task_but_takes_the_given_config(tmp_path):
     task = registry.get_task("pick_box")
     config = {"env": {"cfg": {"prompt": "把黑盒放到白盒上"}}, "agent": {"mode": "tool"}}
     engine = RunEngine(task, config, workspace=str(tmp_path), body_key="piper")
 
-    twin = engine.clone()
+    edited = {"env": {"cfg": {"prompt": "改过的指令"}}, "agent": {"mode": "tool"}}
+    twin = engine.rerun_with(edited)
 
     assert twin is not engine
     assert twin._task is task and twin._workspace == str(tmp_path)
     assert twin._body_key == "piper"
-    assert twin._config.data == engine._config.data
-    twin._config.set("env.cfg.prompt", "改了")  # 深拷贝:动克隆不影响原引擎
+    # 重跑用的是传进来的配置,不是引擎开跑时那份快照。
+    assert twin._config.get("env.cfg.prompt") == "改过的指令"
     assert engine._config.get("env.cfg.prompt") == "把黑盒放到白盒上"
+    twin._config.set("env.cfg.prompt", "又改了")  # 深拷贝:动新引擎不回写调用方的 dict
+    assert edited["env"]["cfg"]["prompt"] == "改过的指令"
+
+
+def test_engine_exposes_the_body_and_task_it_ran(tmp_path):
+    task = registry.get_task("pick_box")
+    engine = RunEngine(task, {}, workspace=str(tmp_path), body_key="piper")
+    assert engine.body_key == "piper"
+    assert engine.task_key == task.key
 
 
 def test_drain_is_empty_before_start(tmp_path):

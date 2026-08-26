@@ -43,6 +43,7 @@ from jiuwensymbiosis.adapters.so101.geometry import (
     position_error_mm,
 )
 from jiuwensymbiosis.env.protocol import HandGuidingRecoveryError
+from jiuwensymbiosis.errors import JiuwenSymbiosisError, SafetyViolationError, error_code
 from jiuwensymbiosis.utils import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - import-only typing helpers
@@ -131,8 +132,16 @@ class So101CartesianServoError(ValueError):
         super().__init__(f"{self.code}: {detail}")
 
 
-class So101PreDispatchError(ValueError):
-    """A motion request rejected before the first hardware command was sent."""
+class So101PreDispatchError(JiuwenSymbiosisError, ValueError):
+    """A motion request rejected before the first hardware command was sent.
+
+    One wrapper, several causes: an envelope/limit rejection, IK that did not
+    converge, a path too long for the configured interpolation step, a malformed
+    orientation config. So ``code`` is forwarded from whichever check raised
+    rather than fixed on the class — a class-level code would label all four
+    alike and send the operator after the wrong one. No code means "cause not
+    classified", which the diagnosis table reads as "no specific card".
+    """
 
     skip_recovery = True
 
@@ -972,7 +981,7 @@ class So101Driver:
             self._validate_joint_vector(q, label="move_joint_blocking target")
             self._check_joint_limits(np.asarray(q, dtype=float), label="move_joint_blocking target")
         except ValueError as exc:
-            raise So101PreDispatchError(str(exc)) from exc
+            raise So101PreDispatchError(str(exc), code=error_code(exc)) from exc
 
         current = np.asarray(self.get_angles(), dtype=float)
         target = np.asarray(q, dtype=float)
@@ -990,7 +999,7 @@ class So101Driver:
                     z_floor_override=z_floor_override,
                 )
         except ValueError as exc:
-            raise So101PreDispatchError(str(exc)) from exc
+            raise So101PreDispatchError(str(exc), code=error_code(exc)) from exc
 
         self._dispatch_prevalidated_waypoints(
             waypoints,
@@ -2074,7 +2083,7 @@ class So101Driver:
         try:
             self._check_cartesian_bounds(pose, label="goto_pose target")
         except ValueError as exc:
-            raise So101PreDispatchError(str(exc)) from exc
+            raise So101PreDispatchError(str(exc), code=error_code(exc)) from exc
 
         desired_matrix = np.asarray(pose_mm_deg_to_matrix_m(pose), dtype=float)
         current_q = np.asarray(self.get_angles(), dtype=float)
@@ -2095,7 +2104,7 @@ class So101Driver:
                 z_floor_override=z_floor_override,
             )
         except ValueError as exc:
-            raise So101PreDispatchError(str(exc)) from exc
+            raise So101PreDispatchError(str(exc), code=error_code(exc)) from exc
 
         # 3. Dispatch the pre-validated joint waypoints (shared settle loop).
         self._dispatch_prevalidated_waypoints(
@@ -2387,11 +2396,13 @@ class So101Driver:
         raise RuntimeError(f"SOFollower observation missing motor '{name}' (tried '{name}.pos', '{name}').")
 
     def _check_joint_limits(self, q: np.ndarray, *, label: str) -> None:
+        """Soft-limit check. Rejections are ``SafetyViolationError`` (still a
+        ``ValueError``) so the code survives the pre-dispatch wrapper."""
         limits = self._cfg.joint_limits
         for i, name in enumerate(ARM_JOINT_ORDER):
             lo, hi = limits[name]
             if not (lo <= float(q[i]) <= hi):
-                raise ValueError(f"{label}: {name}={float(q[i])} out of soft limits [{lo}, {hi}].")
+                raise SafetyViolationError(f"{label}: {name}={float(q[i])} out of soft limits [{lo}, {hi}].")
 
     def _escape_z_floor(self, start_q: np.ndarray) -> float | None:
         """Return the relaxed Z floor for a motion that starts below the floor.
@@ -2479,10 +2490,10 @@ class So101Driver:
                 if z_floor_override is None
                 else (f"the start-pose escape floor {z_floor:.3f} mm (driver z_min_safe={configured_floor:g} mm)")
             )
-            raise ValueError(f"{label}: z={pose.z:.3f} mm below {bound}.")
+            raise SafetyViolationError(f"{label}: z={pose.z:.3f} mm below {bound}.")
         z_ceil = getattr(self._cfg, "z_max_safe_mm", None)
         if z_ceil is not None and pose.z > z_ceil:
-            raise ValueError(f"{label}: z={pose.z:.3f} mm above driver z_max_safe={z_ceil} mm.")
+            raise SafetyViolationError(f"{label}: z={pose.z:.3f} mm above driver z_max_safe={z_ceil} mm.")
         table_z = getattr(self._cfg, "table_z_mm", None)
         if table_z is not None:
             payload_offset = float(self._cfg.payload_protrusion_mm) if self._holding_payload else 0.0
@@ -2494,7 +2505,7 @@ class So101Driver:
                 start_lowest_z = float(z_floor_override) - float(self._cfg.gripper_lowest_offset_mm) - payload_offset
                 lowest_floor = min(lowest_floor, start_lowest_z)
             if lowest_z < lowest_floor:
-                raise ValueError(
+                raise SafetyViolationError(
                     f"{label}: effective lowest z={lowest_z:.3f} mm below table clearance floor "
                     f"{lowest_floor:.3f} mm (control z={pose.z:.3f}, holding_payload={self._holding_payload})."
                 )
@@ -2502,9 +2513,9 @@ class So101Driver:
         if bounds is not None:
             xmin, ymin, xmax, ymax = bounds
             if not (xmin <= pose.x <= xmax):
-                raise ValueError(f"{label}: x={pose.x:.3f} mm out of workspace x=[{xmin}, {xmax}].")
+                raise SafetyViolationError(f"{label}: x={pose.x:.3f} mm out of workspace x=[{xmin}, {xmax}].")
             if not (ymin <= pose.y <= ymax):
-                raise ValueError(f"{label}: y={pose.y:.3f} mm out of workspace y=[{ymin}, {ymax}].")
+                raise SafetyViolationError(f"{label}: y={pose.y:.3f} mm out of workspace y=[{ymin}, {ymax}].")
 
     def _joint_waypoints(self, current: np.ndarray, target: np.ndarray) -> list[np.ndarray]:
         """Linear joint interpolation; ``steps = ceil(max|Δ| / max_joint_step_deg)``."""

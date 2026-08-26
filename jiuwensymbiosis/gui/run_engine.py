@@ -146,15 +146,25 @@ class RunEngine:
         # complementary between-step path (UIBridgeRail.before_tool_call).
         self._cancel = CancelToken()
 
-    def clone(self) -> RunEngine:
-        """以同样的本体/任务/配置/工作区新建一个引擎(供运行页「重新执行」)。
+    @property
+    def body_key(self) -> str:
+        """本次运行的本体;「重新执行」据此取该本体当前的配置。"""
+        return self._body_key
 
-        用引擎自身持有的参数而非当前界面状态,保证「同配置重跑」——与运行后用户是否又改了
-        配置无关。配置深拷贝,互不影响。
+    @property
+    def task_key(self) -> str:
+        """本次运行的任务 key。"""
+        return str(self._task.key)
+
+    def rerun_with(self, config_data: dict[str, Any]) -> RunEngine:
+        """同一本体/任务/工作区,换用 ``config_data`` 新建一个引擎(供「重新执行」)。
+
+        本体与任务取自引擎自身(界面此后可能已切走),配置由调用方给出,所以配置页改完再点
+        「重新执行」跑的是新配置。配置深拷贝,两个引擎互不影响。
         """
         return RunEngine(
             self._task,
-            copy.deepcopy(self._config.data),
+            copy.deepcopy(config_data),
             workspace=self._workspace,
             body_key=self._body_key,
         )

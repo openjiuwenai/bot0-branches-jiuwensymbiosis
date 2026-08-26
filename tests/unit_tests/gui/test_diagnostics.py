@@ -127,12 +127,49 @@ def test_safety_rejection_code_gets_its_own_card():
 
 def test_unknown_code_falls_back_to_the_text_rules():
     # 适配器自带的 code 没有对应卡时,不能吃掉文本判断
-    d = diagnose("RuntimeError: target 'banana' not detected", code="cartesian_bounds_rejected")
+    d = diagnose("RuntimeError: target 'banana' not detected", code="hardware_send_mismatch")
     assert d.title == "没识别到目标物体"
 
 
-def test_code_table_only_uses_known_codes():
-    assert set(diagnostics._CODE_TABLE) <= errors.ERROR_CODES
+def test_every_framework_code_has_a_card():
+    # errors.ERROR_CODES 是框架自己写得出来的码,每一个都必须有卡,否则源头明明报了准
+    # 信、界面却只能显示兜底。反向不成立:适配器自带的码(cartesian_bounds_rejected)
+    # 也可以映射进来,它们不在 ERROR_CODES 里。
+    assert errors.ERROR_CODES <= set(diagnostics._CODE_TABLE)
+
+
+def test_servo_cartesian_bounds_rejection_shares_the_safety_card():
+    d = diagnose(
+        "So101CartesianServoError: cartesian_bounds_rejected: servo_to_pose target: z=-9 below driver z_min_safe=0",
+        code="cartesian_bounds_rejected",
+    )
+    assert d.title == "动作被安全护栏拦下"
+
+
+def test_the_two_cards_word_the_same_check_the_same_way():
+    # 抓取扑空与目标越界都要查感知/标定;两处措辞若各写各的,用户会当成两件事。
+    grasp = diagnose("x", code="grasp_not_confirmed")
+    safety = diagnose("x", code="safety_rejected")
+    shared = set(grasp.steps) & set(safety.steps)
+    assert len(shared) == 1
+
+
+class TestArmBusCards:
+    """CAN 与串口分开认:so101 没有 CAN,不能被指去激活 CAN。"""
+
+    def test_can_error_reads_as_can(self):
+        assert diagnose("OSError: [Errno 19] can0: No such device").title == "机械臂连接失败"
+        assert "CAN" in diagnose("OSError: can0 no such device").cause
+
+    def test_serial_error_does_not_mention_can(self):
+        d = diagnose("SerialException: could not open port /dev/ttyACM0")
+        assert d.title == "机械臂连接失败"
+        assert "CAN" not in d.cause
+        assert "串口" in d.cause
+
+    def test_a_bare_device_error_is_not_blamed_on_the_arm(self):
+        # "no such device" 相机也会报;泛词不该被机械臂卡吃掉。
+        assert diagnose("RuntimeError: no such device").title == "运行失败"
 
 
 def test_every_rule_needs_a_main_error_signal():

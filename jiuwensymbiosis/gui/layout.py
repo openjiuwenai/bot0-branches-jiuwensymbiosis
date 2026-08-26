@@ -323,11 +323,16 @@ class Layout:
             self._state.engine.request_stop()
 
     def _rerun(self) -> None:
-        """用刚跑完那次的同一配置重跑(克隆引擎,不受运行后改动的配置影响)。"""
+        """重跑同一本体、同一任务,带上配置页此刻的配置。
+
+        本体/任务取自引擎(界面此后可能已切走),配置现取,所以「改完配置点重新执行」跑的就是
+        改后的那份——与配置页的「用当前配置运行」一致。
+        """
         engine = self._state.engine
         if engine is None or self._state.is_busy():
             return
-        fresh = engine.clone()
+        model = self._state.config_for(engine.body_key, engine.task_key)
+        fresh = engine.rerun_with(model.data)
         self._state.engine = fresh
         self._goto(self._run_tab)
         self._run.attach(fresh)

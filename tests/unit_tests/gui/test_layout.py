@@ -144,3 +144,36 @@ def test_saving_dropped_config_lands_in_body_dir_and_dropdown(layout):
     assert saved.read_text(encoding="utf-8") == _DROPPED_YAML
     assert str(saved) in layout._home._config_file.options  # 主页下拉即刻多出这份配置
     assert state.current_config().get("env.cfg.low_level.port") == "/dev/dropped"
+
+
+class TestRerunTakesTheCurrentConfig:
+    """「重新执行」跑的是配置页此刻的配置,不是上次开跑时那份快照。"""
+
+    def _finished_run(self, layout: Layout):
+        """装出一次跑完的运行:引擎记着本体/任务,界面随后改了配置。"""
+        layout._tools.release_hardware = lambda **_kw: True
+        layout._run.attach = lambda engine: None
+        layout._start_run(layout._state.current_task)
+        return layout._state.engine
+
+    def test_edits_made_after_the_run_reach_the_rerun(self, layout):
+        engine = self._finished_run(layout)
+        assert engine is not None
+        layout._state.current_config().set("env.cfg.low_level.port", "/dev/edited")
+
+        layout._rerun()
+
+        fresh = layout._state.engine
+        assert fresh is not engine
+        assert fresh._config.get("env.cfg.low_level.port") == "/dev/edited"
+
+    def test_the_rerun_keeps_the_body_and_task_that_ran(self, layout):
+        engine = self._finished_run(layout)
+        body_key, task_key = engine.body_key, engine.task_key
+        # 界面切走本体后重跑:重跑的仍是刚才那个本体/任务。
+        layout._state.current_body = "some-other-body"
+
+        layout._rerun()
+
+        fresh = layout._state.engine
+        assert fresh.body_key == body_key and fresh.task_key == task_key

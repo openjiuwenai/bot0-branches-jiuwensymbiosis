@@ -38,6 +38,7 @@ from jiuwensymbiosis.adapters.so101.lowlevel import (
     So101PreDispatchError,
 )
 from jiuwensymbiosis.env.protocol import HandGuidingDriver, HandGuidingRecoveryError
+from jiuwensymbiosis.errors import SAFETY_REJECTED, error_code
 
 from .lowlevel_helpers import FakeFollower, FakeKinematics, fake_lerobot_import, make_calib_file
 
@@ -2364,3 +2365,34 @@ class TestZFloorEscapeHatch:
             driver.move_joint_blocking([0.0, 0.0, 0.0, 0.0, 0.0])
 
         assert len(follower.sent_actions) == sent_before
+
+
+class TestPreDispatchErrorCode:
+    """Only the envelope rejections carry ``safety_rejected``.
+
+    The wrapper covers several causes; coding it on the class would label an IK
+    failure or a malformed config as a boundary violation and send the operator
+    to check the workspace instead of the real problem.
+    """
+
+    def test_soft_limit_rejection_carries_safety_rejected(self, tmp_path):
+        cfg = _make_cfg()
+        driver, _follower, _ = _make_driver(cfg, tmp_path)
+        driver.connect()
+        with pytest.raises(So101PreDispatchError) as exc_info:
+            driver.move_joint_blocking([0.0, 0.0, 0.0, 0.0, 999.0])
+        assert "out of soft limits" in str(exc_info.value)
+        assert error_code(exc_info.value) == SAFETY_REJECTED
+
+    def test_z_floor_rejection_carries_safety_rejected(self, tmp_path):
+        cfg = _make_cfg(z_min_safe_mm=30.0)
+        driver, _follower, _ = _make_driver(cfg, tmp_path)
+        driver.connect()
+        with pytest.raises(So101PreDispatchError) as exc_info:
+            driver.move_to_pose_blocking(So101Pose(0.0, 0.0, 25.0, 0.0, 0.0, 0.0))
+        assert error_code(exc_info.value) == SAFETY_REJECTED
+
+    def test_malformed_orientation_config_carries_no_code(self):
+        # An orientation config error is not a boundary violation: it must not
+        # inherit the safety card just because it shares the wrapper type.
+        assert error_code(So101PreDispatchError("orientation overrides must be numeric.")) == ""

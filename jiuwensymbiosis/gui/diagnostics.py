@@ -91,6 +91,11 @@ _ARM_CAN = Diagnosis(
     cause="可能连不上机械臂(CAN 接口没激活,或线没接好)。",
     steps=("确认 CAN 已激活、线缆已接后重试。",),
 )
+_ARM_SERIAL = Diagnosis(
+    title="机械臂连接失败",
+    cause="可能连不上机械臂(串口设备不存在、被占用,或没有访问权限)。",
+    steps=("确认机械臂已上电、串口线已接;到「配置」核对端口(如 /dev/ttyACM0)。",),
+)
 _NO_CAMERA = Diagnosis(
     title="没读到相机画面",
     cause="相机可能没连上/没被识别到(没插好、被别的程序占用,或配置里相机序列号不对),视觉拿不到画面。",
@@ -106,16 +111,23 @@ _OUT_OF_REACH = Diagnosis(
     cause="目标位置可能超出了机械臂的可达空间或关节限位,动作被中止(机械臂已停在原地)。",
     steps=("把目标移到机械臂工作范围内(更靠近基座)后重试;并确认标定/工作区设置正确。",),
 )
+# 抓取点与运动目标都由感知加标定算出,两张卡指的是同一个检查——共用一份文案,免得
+# 各写各的,让用户以为是两件事。
+_CHECK_PERCEPTION = "检查感知与标定是否有偏差;必要时到「工具 → 手眼标定」重做标定。"
+
 # 下面两张卡只由 code 命中(失败点自己写下的机器码),所以原因是确定的、不用"可能"。
 _SAFETY_REJECTED = Diagnosis(
     title="动作被安全护栏拦下",
     cause="目标位置超出了设定的安全范围(低于安全高度、越过工作区边界,或关节超出软限位),动作在执行前被拦下,机械臂停在原地。",
-    steps=("把目标移回工作范围内后重试;若范围本身设置错了,到「配置」里核对安全高度/工作区边界/关节限位。",),
+    steps=(
+        "照错误信息里越界的那一项,到「配置」核对安全高度 / 工作区边界 / 关节软限位。",
+        _CHECK_PERCEPTION,
+    ),
 )
 _GRASP_NOT_CONFIRMED = Diagnosis(
     title="夹爪合拢后没夹到东西",
-    cause="夹爪已经合拢,但没有检测到物体接触(合到底了),动作序列因此中止。",
-    steps=("确认物体在夹爪正下方、尺寸适合夹取;必要时重新标定抓取高度后重试。",),
+    cause="夹爪已合拢到全闭位置,中间没有物体,动作序列因此中止。",
+    steps=(_CHECK_PERCEPTION, "确认物体尺寸在夹爪行程内。"),
 )
 _FALLBACK = Diagnosis(
     title="运行失败",
@@ -186,7 +198,10 @@ _RULES: tuple[_Rule, ...] = (
         err_excludes=("detector",),
     ),
     _Rule(_GPU_OOM, err_needles=("out of memory", "cuda oom", "cublas_status_alloc_failed")),
-    _Rule(_ARM_CAN, err_needles=("can_left", "socketcan", "no such device", "serial", "can0")),
+    # 总线分开认:so101 走串口、没有 CAN,一张 CAN 卡会把它引去查根本不存在的东西。
+    # 泛词 "no such device" 两边都不收——相机的设备错误也长这样,宁可落到兜底卡。
+    _Rule(_ARM_CAN, err_needles=("can_left", "socketcan", "can0")),
+    _Rule(_ARM_SERIAL, err_needles=("serial", "ttyacm", "ttyusb")),
 )
 
 
@@ -202,6 +217,9 @@ _CODE_TABLE: dict[str, Diagnosis] = {
     "detector_start_timeout": _DETECTOR_TIMEOUT,
     "safety_rejected": _SAFETY_REJECTED,
     "grasp_not_confirmed": _GRASP_NOT_CONFIRMED,
+    # 适配器自带的码(见 adapters/_common/kinematic_driver.py):servo 下发前的笛卡尔
+    # 边界拒绝,与 safety_rejected 是同一件事,同卡。
+    "cartesian_bounds_rejected": _SAFETY_REJECTED,
 }
 
 
