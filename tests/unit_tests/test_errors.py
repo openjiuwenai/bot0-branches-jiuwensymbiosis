@@ -22,11 +22,11 @@ def test_detection_reasons_are_part_of_the_code_set():
     assert DETECTION_REASONS <= ERROR_CODES
 
 
-def test_perception_vision_reexports_the_same_object():
-    # 感知层的 reason 契约与 code 表必须是同一份,否则两边会各自漂移
-    from jiuwensymbiosis.perception import vision
+def test_reuses_the_same_object_as_the_result_contract():
+    # 结果契约的 reason 集合与 code 表必须是同一份,否则两边会各自漂移
+    from jiuwensymbiosis import contracts
 
-    assert vision.DETECTION_REASONS is DETECTION_REASONS
+    assert contracts.DETECTION_REASONS is DETECTION_REASONS
 
 
 def test_typed_errors_carry_their_code():

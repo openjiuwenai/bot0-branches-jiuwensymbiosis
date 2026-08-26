@@ -31,7 +31,6 @@ build_so101_session = make_builder(
         "z_correction_mm",
         "grasp_z_offset_mm",
         "place_z_offset_mm",
-        "minimum_floor_margin_mm:floor_margin_mm",
         "grasp_top_surface_enabled",
         "grasp_top_band_mm",
         "grasp_top_percentile",

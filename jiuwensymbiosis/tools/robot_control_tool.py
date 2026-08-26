@@ -25,22 +25,72 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import uuid
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from jiuwensymbiosis.agent.abstractions import Tool, ToolCard, ToolOutput
+from jiuwensymbiosis.api.decorators import ToolMeta
+from jiuwensymbiosis.api.memory import ExecutionMemory, action_succeeded
 from jiuwensymbiosis.errors import error_code
 
+logger = logging.getLogger(__name__)
 
-def _build_action_index(api: Any, env: Any = None) -> dict[str, Callable[..., Any]]:
-    """扫描 ``type(api).__mro__`` 收集 ``@robot_tool`` 标注的方法，按 ``meta.name`` 索引。
+
+def record_action(api: Any, method: Callable[..., Any], params: dict[str, Any], result: Any) -> None:
+    """Fold one executed action into the api's ``ExecutionMemory``.
+
+    Called from every dispatch path so the memory reflects what actually ran,
+    whichever tool strategy the agent was built with. Best-effort: bookkeeping
+    must never turn a successful robot action into a tool failure.
+    """
+    memory = getattr(api, "memory", None)
+    if not isinstance(memory, ExecutionMemory):
+        return
+    meta = getattr(method, "__tool_meta__", None)
+    try:
+        memory.observe(meta, params, result)
+        _stale_sensing_cache(api, meta, result)
+    except Exception as exc:  # noqa: BLE001 - state bookkeeping must not break dispatch
+        logger.warning("[memory] failed to record %s: %s", getattr(method, "__name__", method), exc)
+
+
+def _stale_sensing_cache(api: Any, meta: ToolMeta | None, result: Any) -> None:
+    """Drop the api's sensing cache whenever the memory's locations went stale.
+
+    ``ExecutionMemory`` owns whether a reading is still *valid*; the api cache only
+    holds the payload a later grasp/place consumes. The two must go at once, or the
+    planner sees "no location" while the acting step still reads base-frame
+    coordinates measured from a standpoint the body has left.
+
+    An action that also ``produces_location`` refreshed the cache itself while it
+    ran (the approach loops write it mid-flight), so clearing it afterwards would
+    throw away the fresh reading — this mirrors the net effect ``observe`` gets by
+    invalidating before it records.
+    """
+    if meta is None or not meta.invalidates_locations or meta.produces_location:
+        return
+    if not action_succeeded(result):
+        return
+    clear = getattr(api, "invalidate_sensing_cache", None)
+    if callable(clear):
+        clear()
+
+
+def _build_action_index(api: Any, env: Any = None, *, planner_only: bool = False) -> dict[str, Callable[..., Any]]:
+    """扫描 ``type(api).__mro__`` 收集带 ``ToolMeta`` 的方法，按 ``meta.name`` 索引。
 
     与 ``builder.py`` 的扫描策略一致：
 
     - ``seen`` 按 ``attr_name`` 去重（子类 override 优先）。
     - capability gate 与 ``build_robot_tools`` 一致：传入 ``env`` 时使用
       ``api.capabilities & env.capabilities``，否则仅使用 API 能力。
+
+    Args:
+        planner_only: 只返回规划器词表里的动作（共享 ``ActionSpec`` 且 ``planner_visible``）。
+            默认 ``False`` —— 派发路径必须能调到调试/标定类动作，只有面向 LLM 的
+            调用点才收窄（见 ``agent/run.py`` 与 ``agent/builder.py``）。
 
     返回 ``{action_name: bound_method}``。
     """
@@ -51,25 +101,19 @@ def _build_action_index(api: Any, env: Any = None) -> dict[str, Callable[..., An
         effective_caps = api_caps & env_caps
     index: dict[str, Callable[..., Any]] = {}
     seen: set[str] = set()
-    api_type = type(api)
     for cls in type(api).__mro__:
         for attr_name, attr_value in cls.__dict__.items():
             if attr_name in seen:
                 continue
             if not callable(attr_value):
                 continue
-            meta = getattr(attr_value, "__robot_tool__", None)
+            meta = getattr(attr_value, "__tool_meta__", None)
             if meta is None:
                 continue
             seen.add(attr_name)
-            owning_capability = meta.capability
-            if owning_capability is None:
-                for owner in api_type.__mro__:
-                    cap = owner.__dict__.get("capability")
-                    if isinstance(cap, str) and attr_name in owner.__dict__:
-                        owning_capability = cap
-                        break
-            if owning_capability and owning_capability not in effective_caps:
+            if planner_only and not meta.planner_visible:
+                continue
+            if meta.capability and meta.capability not in effective_caps:
                 continue
             index[meta.name] = getattr(api, attr_name)
     return index
@@ -159,6 +203,7 @@ class RobotControlTool(Tool):
             result = method(**params)
             if inspect.isawaitable(result):
                 result = await result
+            record_action(self._api, method, params, result)
             return ToolOutput(
                 success=True,
                 data={"action": action, "result": result},

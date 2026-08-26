@@ -21,6 +21,15 @@ Notes:
   end effector closed and attempts a payload-aware recovery home. It never
   drops the payload merely because endpoint settle was outside tolerance.
 - If ``home`` itself fails, recovery does not retry the same failed home motion.
+
+Two optional api hooks let a body join this without a bespoke rail, both looked
+up by name so no adapter import is needed:
+
+- ``release_effector()`` — release for bodies whose end effector is neither a
+  suction cup nor a parallel gripper (dual-arm paddles, magnets, …). Tried after
+  ``deactivate_suction`` / ``open_gripper``, before the env-level fallback.
+- ``recovery_home()`` — the payload-aware retreat, preferred over ``home()``.
+  A body whose plain ``home()`` would drop a held payload implements it.
 """
 
 from __future__ import annotations
@@ -71,7 +80,7 @@ def recover_session(
     api = session.api
     released_ok = False
     if release:
-        for stop_method in ("deactivate_suction", "open_gripper"):
+        for stop_method in ("deactivate_suction", "open_gripper", "release_effector"):
             fn = getattr(api, stop_method, None)
             if not callable(fn):
                 continue
@@ -224,7 +233,7 @@ class RecoveryRail(AgentRail):
         if api is None:
             return False
         method = getattr(api, effective_name, None)
-        meta = getattr(method, "__robot_tool__", None)
+        meta = getattr(method, "__tool_meta__", None)
         if meta is None:
             return False
         return bool(set(meta.tags) & self.watch_tags)
@@ -233,7 +242,7 @@ class RecoveryRail(AgentRail):
         """Return the effective API method's robot-tool tags."""
         api = getattr(self.session, "api", None)
         method = getattr(api, effective_name, None) if api is not None else None
-        meta = getattr(method, "__robot_tool__", None)
+        meta = getattr(method, "__tool_meta__", None)
         return set(getattr(meta, "tags", ()))
 
     @staticmethod

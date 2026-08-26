@@ -6,7 +6,7 @@
 Covers:
 - So101Env capabilities, read-only property setters (AttributeError), joint_limits
   ordering over ARM_JOINT_ORDER, observation extra.
-- So101Api structure: @robot_tool methods present, no VisionMixin tools.
+- So101Api structure: every declared action present and carrying its contract.
 - So101Api delegates: open/close_gripper -> set_end_effector, goto_pose(pose) ->
   move_to_flange(So101Pose), goto_xyzr preserves r.
 - build_robot_tools gating: SO-101 tools emitted only for the milestone-A caps.
@@ -120,6 +120,9 @@ class TestSo101EnvCapabilities:
                 "motion.joint",
                 "grasp.parallel",
                 "motion.servo",
+                # planning.reachability is NOT here: it is derived from shipping a URDF +
+                # arm_chains (BaseRobotEnv.effective_capabilities), and this Env exposes
+                # neither — so the judge could only ever have answered "unknown".
             }
         )
 
@@ -140,7 +143,6 @@ class TestSo101EnvReadOnlyProperties:
     @pytest.mark.parametrize(
         "prop,val",
         [
-            ("low_level", None),
             ("z_min_safe", 50.0),
             ("workspace_bounds", (0.0, 0.0, 100.0, 100.0)),
             ("joint_limits", None),
@@ -152,6 +154,26 @@ class TestSo101EnvReadOnlyProperties:
         env = _make_env()
         with pytest.raises(AttributeError, match="read-only"):
             setattr(env, prop, val)
+
+
+class TestSo101EnvLowLevelBinding:
+    """``low_level`` is bindable exactly once — the seam a smoke test or simulator uses.
+
+    The invariant is not "never settable" but "connect/disconnect owns rebinding": a driver
+    may be bound while none is, and never swapped out from under a bound one.
+    """
+
+    def test_binds_while_unbound(self):
+        env = _make_env()
+        driver = object()
+        env.low_level = driver
+        assert env.low_level is driver
+
+    def test_refuses_to_rebind_once_bound(self):
+        env = _make_env()
+        env.low_level = object()
+        with pytest.raises(AttributeError, match="already bound"):
+            env.low_level = object()
 
 
 class TestSo101EnvJointLimits:
@@ -249,7 +271,7 @@ class TestSo101EnvObservation:
 
 # ====================================================================== API
 class TestSo101ApiStructure:
-    def test_api_has_robot_tool_methods(self):
+    def test_api_has_action_methods(self):
         expected = [
             "home",
             "get_pose",
@@ -263,17 +285,16 @@ class TestSo101ApiStructure:
         for name in expected:
             method = getattr(So101Api, name, None)
             assert method is not None, f"So101Api.{name} not found"
-            assert hasattr(method, "__robot_tool__"), f"So101Api.{name} missing @robot_tool"
+            assert hasattr(method, "__tool_meta__"), f"So101Api.{name} missing @implements"
 
     def test_vision_methods_present(self):
-        """VisionMixin IS mixed in (milestone B): its tools are on So101Api."""
+        """Milestone B: the body declares the vision actions itself, off its own calibration."""
         for name in ("get_grasp_info_simple", "pixel_to_base_xyz", "get_image", "analyze_scene"):
             assert hasattr(So101Api, name), f"So101Api missing vision method {name}"
 
     def test_api_capabilities(self):
-        # api.capabilities is the union of mixin `capability` strings across the
-        # MRO (motion*2 + grasp + vision.detection); vision.camera/depth are
-        # ENV hardware capabilities, not Api mixin capabilities.
+        # api.capabilities is what the api can DO: the capability of every action it
+        # implements, plus the marker `capability` attrs it claims explicitly.
         api, _env, _driver = _build_api()
         assert api.capabilities == frozenset(
             {
@@ -281,23 +302,39 @@ class TestSo101ApiStructure:
                 "motion.joint",
                 "grasp.parallel",
                 "vision.detection",
+                # Derived from the actions this api implements: get_image /
+                # pixel_to_base_xyz are gated on vision.camera, not on the detector.
+                "vision.camera",
+                # Markers no action carries, so the api must claim them or the api ∩ env
+                # gate silently drops them: motion.servo is what allows the fast path to
+                # FOLLOW a moving target, eye_to_hand says a detection is already absolute.
+                "motion.servo",
+                "vision.eye_to_hand",
+                "vision.depth",
+                # It ships a URDF, so it gets the generic reach judge — proprioception
+                # follows from having a kinematic model, not from being a given robot.
+                "planning.reachability",
             }
         )
 
-    def test_open_gripper_has_no_input_params(self):
-        meta = So101Api.open_gripper.__robot_tool__
-        assert meta.input_params == {"type": "object", "properties": {}}
+    def test_open_gripper_advertises_the_shared_contract(self):
+        # The shared action declares width_mm; this body accepts and ignores it. The CONTRACT
+        # calls it a hint, so no per-body caveat is needed and one skill drives either gripper.
+        meta = So101Api.open_gripper.__tool_meta__
+        assert set(meta.input_params["properties"]) == {"width_mm"}
+        assert "HINT" in meta.description
 
-    def test_close_gripper_has_no_input_params(self):
-        meta = So101Api.close_gripper.__robot_tool__
-        assert meta.input_params == {"type": "object", "properties": {}}
+    def test_close_gripper_advertises_the_shared_contract(self):
+        meta = So101Api.close_gripper.__tool_meta__
+        assert set(meta.input_params["properties"]) == {"force_n"}
+        assert "HINT" in meta.description
 
-    def test_private_fast_tracking_hook_is_not_a_robot_tool(self):
+    def test_private_fast_tracking_hook_is_not_an_action(self):
         assert hasattr(So101Api, "get_grasp_tracking_sample")
-        assert not hasattr(So101Api.get_grasp_tracking_sample, "__robot_tool__")
+        assert not hasattr(So101Api.get_grasp_tracking_sample, "__tool_meta__")
 
     def test_goto_pose_input_params_exposes_nested_pose(self):
-        meta = So101Api.goto_pose.__robot_tool__
+        meta = So101Api.goto_pose.__tool_meta__
         top = meta.input_params
         assert top.get("type") == "object"
         assert top.get("required") == ["pose"]
@@ -323,9 +360,8 @@ class TestSo101ApiDelegates:
                 "box": [2.0, 2.0, 6.0, 6.0],
             }
         ]
-        # dump_grasp_debug is now invoked from the shared VisionMixin pipeline.
         monkeypatch.setattr(
-            "jiuwensymbiosis.api.mixins.dump_grasp_debug",
+            "jiuwensymbiosis.adapters.so101.api.dump_grasp_debug",
             lambda **_kwargs: None,
         )
         tracking_metadata = MagicMock(wraps=api._tracking_metadata)
@@ -393,8 +429,8 @@ class TestSo101ApiDelegates:
         assert api.is_grasp_confirmed({"ok": False, "state": "contact"}) is False
         assert api.is_grasp_confirmed(None) is False
 
-    def test_grasp_confirmation_hook_is_not_a_robot_tool(self):
-        assert not hasattr(So101Api.is_grasp_confirmed, "__robot_tool__")
+    def test_grasp_confirmation_hook_is_not_an_action(self):
+        assert not hasattr(So101Api.is_grasp_confirmed, "__tool_meta__")
 
     def test_open_gripper_ignores_width_mm(self):
         api, env, _driver = _build_api()
@@ -493,12 +529,16 @@ class TestSo101ApiDelegates:
         assert "home" in driver.log
 
     def test_move_joint_reaches_driver(self):
+        """Named in, vector out — the Env converts via ARM_JOINT_ORDER-keyed joint_limits."""
         api, _env, driver = _build_api()
-        api.move_joint([1.0, 2.0, 3.0, 4.0, 5.0])
+        api.move_joint({
+            "shoulder_pan": 1.0, "shoulder_lift": 2.0, "elbow_flex": 3.0,
+            "wrist_flex": 4.0, "wrist_roll": 5.0,
+        })
         assert ("joint", [1.0, 2.0, 3.0, 4.0, 5.0]) in driver.log
 
     def test_move_direction_routes_so101pose_not_namespace(self):
-        """The generic MotionMixin.move_direction hands a SimpleNamespace to
+        """The generic defaults.move_direction hands a SimpleNamespace to
         env.move_to_flange; So101Env must normalize it to a So101Pose so the real
         driver (which requires So101Pose) doesn't raise TypeError. The spy driver
         accepts any object, so this test pins the normalization explicitly."""
@@ -560,8 +600,8 @@ class TestSo101ReverseProjection:
     def test_round_trips_pixel_through_base(self):
         api, _env, _driver = _build_api()
         u, v, depth = 300.0, 200.0, 0.5
-        base = api._project_pixel_to_base_raw(u, v, depth)
-        uv = api._project_base_to_pixel(base)
+        base = api.pixel_to_base_xyz(u, v, depth)
+        uv = api._project_base_to_pixel([base["x"], base["y"], base["z"]])
         assert uv is not None
         assert uv[0] == pytest.approx(u, abs=1e-6)
         assert uv[1] == pytest.approx(v, abs=1e-6)

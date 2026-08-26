@@ -1,9 +1,15 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""``RobotDriver`` Protocol — the contract a new vendor implements.
+"""Driver Protocols — the contract a new vendor implements, split by capability.
 
-This is the smallest surface a per-vendor ``XxxLowLevel`` must expose for the
-cross-vendor scaffolding (Env wrappers, ``perception.vision``) to bind onto it.
+These are the surfaces a per-vendor ``XxxLowLevel`` exposes so the cross-vendor
+scaffolding (Env wrappers, ``perception.vision``) can bind onto it. There is one
+protocol per capability rather than one god-protocol: a mobile dual-arm body has
+no flange pose, and a bench arm has no wheels, so a single contract would force
+one of them into ``NotImplementedError`` stubs. ``RobotDriver`` therefore holds
+only what every driver has — ``close()`` — and each capability adds its own
+sibling protocol, mirroring ``CAPABILITY_DRIVER_MEMBERS`` in
+``adapters/_common/capability_spec.py`` row for row.
 
 Structural typing (``typing.Protocol``, not a base class) is intentional:
 
@@ -13,10 +19,8 @@ Structural typing (``typing.Protocol``, not a base class) is intentional:
 * Pose / joint dataclasses are vendor-specific (4-DoF vs 6-DoF).
   A Protocol expresses "has these methods" without enforcing identical
   dataclass shapes.
-* Most properties (camera, suction) are *optional* capabilities. Forcing
-  every driver to implement them as ``raise NotImplementedError`` stubs
-  bloats adapters. Instead, ``Env.capabilities`` advertises what's available
-  and the consumer checks before calling.
+* Capabilities are *optional*. ``Env.capabilities`` advertises what's
+  available and the consumer checks before calling.
 
 Implementer contract:
 
@@ -31,8 +35,8 @@ Implementer contract:
   4. ``close()`` must be idempotent — it's called from ``Env.disconnect``
      which itself may be invoked twice on error paths.
 
-Optional sibling protocol (``JointDriver``) covers joint-space access for
-adapters that support it.
+Mobile-body protocols name the verb the way ``BaseRobotEnv`` does, because an
+Env without its own implementation forwards to the driver under the same name.
 """
 
 from __future__ import annotations
@@ -45,7 +49,15 @@ import numpy as np
 
 @runtime_checkable
 class RobotDriver(Protocol):
-    """The minimum surface a per-vendor low-level driver exposes.
+    """What every driver has, whatever it drives: a releasable connection."""
+
+    def close(self) -> None:
+        """Release SDK resources / disable the robot. Must be idempotent."""
+
+
+@runtime_checkable
+class CartesianDriver(RobotDriver, Protocol):
+    """Flange-frame Cartesian motion — ``motion.cartesian``.
 
     Vendor Pose dataclasses are returned by ``get_pose`` / ``home_pose``.
     ``move_to_pose_blocking`` takes the structured ``pose`` object first
@@ -70,9 +82,6 @@ class RobotDriver(Protocol):
     def tool_offset_mm(self) -> float:
         """Tool-tip offset from the flange along Z (mm), for tip↔flange conversion."""
 
-    def close(self) -> None:
-        """Release SDK resources / disable the robot. Must be idempotent."""
-
     def home(self) -> None:
         """Move the robot to its home pose (blocking)."""
 
@@ -93,7 +102,13 @@ class RobotDriver(Protocol):
 
 @runtime_checkable
 class JointDriver(Protocol):
-    """Optional joint-space surface. Implementations may pick a subset."""
+    """Optional INDEXED joint-space surface — the whole joint vector, in chain order.
+
+    The sibling ``NamedJointDriver`` is the same capability (``motion.joint``) in the other
+    encoding; see it for when a body needs that one instead. A single-chain arm implements
+    this slice, and units are the body's own convention (the one ``move_joint`` states), so a
+    consumer reads them off the body rather than assuming.
+    """
 
     def get_angles(self) -> Any:
         """Return current joint angles as the vendor's JointAngles dataclass."""
@@ -105,6 +120,42 @@ class JointDriver(Protocol):
         timeout_s: float = 30.0,
     ) -> None:
         """Move to joint configuration ``q``, blocking until reached or ``timeout_s`` elapses."""
+
+
+@runtime_checkable
+class NamedJointDriver(Protocol):
+    """Optional NAMED joint-space surface — the same ``motion.joint`` capability as
+    ``JointDriver``, in the encoding a multi-limb body needs.
+
+    Named subsumes indexed (``move_joints_blocking(dict(zip(names, q)))`` is
+    ``move_joint_blocking(q)``), so this is deliberately NOT a merge with ``JointDriver``: a
+    single contract holding both encodings would leave a bench arm — which has no named-joint
+    interface — failing its own composite, the same "forces NotImplementedError stubs" reason
+    this module splits by capability at all. A body implements the encoding its hardware
+    speaks; cruzr happens to speak both and implements both slices.
+
+    Two things the indexed form cannot express, which is why this slice exists:
+
+    * **A partial command.** A dict commands a subset and holds the rest; a list must state
+      every joint. "Raise the right shoulder, hold everything else" is only sayable as a dict.
+    * **A body with more than one kinematic chain.** A list needs an agreed index order. For
+      one arm that is the chain; for two arms plus a waist and a lifter, index 7 means nothing.
+    """
+
+    def get_joint_positions(self) -> dict[str, float]:
+        """Return the latest known joint positions keyed by joint name."""
+
+    def move_joints_blocking(
+        self,
+        targets: dict[str, float],
+        *,
+        timeout_s: float = 30.0,
+    ) -> Any:
+        """Move the NAMED joints in ``targets`` to their absolute positions, holding the rest.
+
+        Blocks until reached or ``timeout_s`` elapses. Joints absent from ``targets`` are held,
+        which is what makes this the form a multi-limb body can use.
+        """
 
 
 @runtime_checkable
@@ -124,6 +175,78 @@ class ServoDriver(Protocol):
         plan (for example, a rate-gate skip or tracking catch-up hold). ``True``
         or legacy ``None`` means the command was accepted.
         """
+
+
+@runtime_checkable
+class BaseDriver(Protocol):
+    """Planar mobile-base motion — ``motion.base`` / ``motion.goal``.
+
+    Both verbs are blocking and return ``{ok, reason, ...}``. Distances are
+    METRES here (detections are millimetres) — the framework's convention.
+    """
+
+    def navigate_relative(self, dx_m: float, dy_m: float = 0.0, dyaw_rad: float = 0.0) -> dict:
+        """Turn by ``dyaw_rad`` then translate (dx forward, dy left), REP-103."""
+
+    def navigate_arc(self, radius_m: float, dyaw_rad: float) -> dict:
+        """Drive ONE constant-curvature arc, turning while advancing."""
+
+
+@runtime_checkable
+class ContinuousBaseDriver(Protocol):
+    """Non-blocking streaming base motion — ``motion.base_servo``.
+
+    The base keeps rolling while the caller senses, so a moving target can be
+    steered toward mid-drive. Pair every ``start`` with a ``stop``: an abandoned
+    handle leaves the wheels turning.
+    """
+
+    def start_base_drive(self, **kwargs: Any) -> Any:
+        """Start a forward drive and return an opaque handle."""
+
+    def base_drive_running(self, handle: Any) -> bool:
+        """Whether the drive behind ``handle`` is still moving."""
+
+    def steer_base_drive(self, handle: Any, bearing_rad: float) -> None:
+        """Aim a running drive at ``bearing_rad`` (+ = left of heading)."""
+
+    def hold_base_drive(self, handle: Any) -> None:
+        """Pause the wheels without ending the drive (target lost → do not creep blind)."""
+
+    def stop_base_drive(self, handle: Any) -> dict:
+        """Stop the drive and reap its result. Idempotent."""
+
+
+@runtime_checkable
+class LifterDriver(Protocol):
+    """Vertical torso/lifter position control — ``motion.lift``."""
+
+    def set_lifter(self, q_lifter: dict[str, float]) -> Any:
+        """Command the lifter joints to absolute positions (rad per joint name)."""
+
+
+@runtime_checkable
+class WaistDriver(Protocol):
+    """Torso yaw rotation — ``motion.waist``."""
+
+    def turn_waist(self, delta_rad: float) -> Any:
+        """Rotate the torso waist by ``delta_rad`` (+ = left)."""
+
+
+@runtime_checkable
+class DualArmDriver(Protocol):
+    """Two arms driven in coordination — ``motion.dual_arm``.
+
+    A TOPOLOGY slice, not an end-effector one: what the arms carry (paddles, grippers, a
+    hand) is the separate ``grasp.*`` axis, and only that part has no cross-vendor default.
+    The coordination around it does — two-arm IK, the ready/descend/contact sequence and
+    the force confirmation are the same whatever is on the end — so ``dual_arm_grasp`` /
+    ``dual_arm_place`` reach a shared implementation and take the contact plan from a body
+    hook. Only ``home`` is contractual here.
+    """
+
+    def home(self) -> None:
+        """Return both arms to their home configuration (blocking)."""
 
 
 @runtime_checkable
@@ -216,7 +339,7 @@ class VisionDriver(Protocol):
 
 
 @runtime_checkable
-class PiperFullDriver(RobotDriver, JointDriver, CameraDriver, GripperDriver, VisionDriver, Protocol):
+class PiperFullDriver(CartesianDriver, JointDriver, CameraDriver, GripperDriver, VisionDriver, Protocol):
     """Composite driver surface — union of all five vendor protocols.
 
     ``PiperLowLevel`` implements all five; ``PiperApi._ll()`` returns this

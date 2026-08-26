@@ -3,9 +3,9 @@
 
 """Tests for the opt-in top-surface (yaw-only bounding box) grasp point.
 
-Covers the pure geometry helpers in ``perception.vision`` and the ``VisionMixin``
-branch wiring (enabled → top-surface point + grasp_rz; disabled → byte-for-byte
-the previous centroid result).
+Covers the pure geometry helpers in ``perception.vision`` and the branch wiring in
+the one body that implements the batch projection seam, SO-101 (enabled →
+top-surface point + grasp_rz; disabled → byte-for-byte the previous centroid result).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from jiuwensymbiosis.api.mixins import VisionMixin
+from jiuwensymbiosis.adapters.so101.api import So101Api
 from jiuwensymbiosis.perception.vision import (
     _erode_mask_bool,
     mask_pixels_and_depths,
@@ -150,7 +150,7 @@ class TestBatchProjectionMatchesSinglePixel:
 
 
 # --------------------------------------------------------------------------
-# VisionMixin branch wiring: enabled → top-surface point + grasp_rz; disabled →
+# SO-101 branch wiring: enabled → top-surface point + grasp_rz; disabled →
 # unchanged centroid result (no grasp_rz).
 # --------------------------------------------------------------------------
 
@@ -161,53 +161,46 @@ class _FakeLowLevel:
         self._depth = depth
         self.intrinsics = intrinsics
         self.calibration = None
+        # Identity eye-to-hand extrinsic: base frame == camera frame, so the
+        # centroid path's projected z is exactly depth_mm.
+        self.tf_base_cam = np.eye(4)
 
     def grab_frames(self):
         return (self._rgb, self._depth)
 
 
+class _FakeCfg:
+    minimum_floor_margin_mm = 0.0
+
+
 class _FakeEnv:
+    cfg = _FakeCfg()
+
     def __init__(self, low_level, z_min_safe=0.0):
         self.low_level = low_level
         self._z_min_safe = z_min_safe
-
-    def get_flange_pose(self):
-        return type("P", (), {"x": 0.0, "y": 0.0, "z": 0.0, "rx": 0, "ry": 0, "rz": 0})()
 
     @property
     def z_min_safe(self):
         return self._z_min_safe
 
 
-class _Stub(VisionMixin):
-    """VisionMixin subclass with a fixed synthetic point cloud for the batch seam."""
+class _Stub(So101Api):
+    """So101Api with a fixed synthetic point cloud behind the batch projection seam."""
 
-    def __init__(self, env, seg_fn, cloud, *, enabled):
-        self.env = env
+    def __init__(self, env, seg_fn, cloud, **kwargs):
+        super().__init__(env, **kwargs)
         self._seg_fn = seg_fn
-        self._z_correction_mm = 0.0
-        self._grasp_z_offset_mm = -25.0
-        self._place_z_offset_mm = 75.0
-        self._floor_margin_mm = 0.0
-        self._grasp_top_surface_enabled = enabled
         self._cloud = cloud
-
-    def _project_pixel_to_base_raw(self, u, v, depth_m):
-        return pixel_and_depth_to_camera_xyz((u, v), depth_m, self.env.low_level.intrinsics)
 
     def _project_mask_pixels_to_base_raw(self, us, vs, depths_m):
         return self._cloud
 
-    def _grasp_debug_tcp(self):
-        from types import SimpleNamespace
 
-        return SimpleNamespace(x=0.0, y=0.0, z=0.0, r=0.0)
-
-
-class TestTopSurfaceGraspMixin:
+class TestTopSurfaceGraspSo101:
     @pytest.fixture(autouse=True)
     def _no_debug_dump(self, monkeypatch):
-        monkeypatch.setattr("jiuwensymbiosis.api.mixins.dump_grasp_debug", lambda **_kwargs: None)
+        monkeypatch.setattr("jiuwensymbiosis.adapters.so101.api.dump_grasp_debug", lambda **_kwargs: None)
 
     def _build(self, *, enabled, cloud):
         from tests.mocks.mock_detector import make_mock_seg_fn
@@ -216,7 +209,7 @@ class TestTopSurfaceGraspMixin:
         depth = np.full((480, 640), 0.5, dtype=np.float32)
         intrinsics = np.array([[600.0, 0.0, 320.0], [0.0, 600.0, 240.0], [0.0, 0.0, 1.0]])
         env = _FakeEnv(_FakeLowLevel(rgb, depth, intrinsics))
-        return _Stub(env, make_mock_seg_fn(score=0.8), cloud, enabled=enabled)
+        return _Stub(env, make_mock_seg_fn(score=0.8), cloud, grasp_top_surface_enabled=enabled)
 
     def test_enabled_uses_cloud_top_surface_and_emits_yaw(self):
         api = self._build(enabled=True, cloud=_banana_cloud())
@@ -271,5 +264,5 @@ class TestTopSurfaceGraspMixin:
 
     def test_tracking_path_does_not_build_overlay(self):
         api = self._build(enabled=True, cloud=_banana_cloud())
-        api._grasp_info_with_intermediates("box", build_overlay=False)
+        api.get_grasp_tracking_sample("box")
         assert api.pop_last_detection_overlay() is None

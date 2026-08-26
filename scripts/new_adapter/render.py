@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from textwrap import dedent
 
-from jiuwensymbiosis.adapters._common.capability_spec import CAPABILITY_MIXIN
+from jiuwensymbiosis.adapters._common.capability_spec import CAPABILITY_ACTIONS
 
 from .spec import Spec
 
@@ -71,8 +71,68 @@ def _dict_literal(pairs: list[tuple[str, str]]) -> str:
 
 
 def _mixin_names(spec: Spec) -> list[str]:
-    names = [CAPABILITY_MIXIN[cap] for cap in spec.capabilities if CAPABILITY_MIXIN.get(cap)]
-    return list(dict.fromkeys(names))
+    """Base classes the generated Api needs — none, for every body the wizard can build.
+
+    Every ACTION is generated as an explicit ``@implements(SPEC)`` method, so the
+    produced file is its own capability list. The two remaining components in
+    the shared implementations reached through ``api/defaults.py`` are
+    *algorithms* that only run once a body supplies their hooks — a calibrated frame,
+    a detector, a base that can drive. A fresh skeleton has none of that, and the
+    wizard cannot build a mobile body at all, so inheriting either would hand the
+    author actions that fail at the first smoke run. Compare cruzr/api.py to add one.
+    """
+    del spec
+    return []
+
+
+# Action → (params after ``self``, args passed on, return annotation) for the actions
+# ``api/defaults.py`` already implements. The generator emits one forwarder each, so the
+# adapter file lists every action the body offers instead of hiding them in a base class.
+_GENERIC_FORWARDERS: dict[str, tuple[str, str, str]] = {
+    "get_home_pose": ("", "", "dict"),
+    "move_direction": ("direction: str, distance_mm: float", "direction, distance_mm", "dict"),
+    "move_joint": ("targets: dict[str, float]", "targets", "Any"),
+    "activate_suction": ("", "", "dict"),
+    "deactivate_suction": ("", "", "dict"),
+    "open_gripper": ("width_mm: float = 80.0", "width_mm", "dict"),
+    "close_gripper": ("force_n: Optional[float] = None", "force_n", "dict"),
+    "get_image": ("", "", "Any"),
+}
+
+
+def _generic_action_names(spec: Spec, exclude: frozenset[str] = frozenset()) -> list[str]:
+    """Generic actions this body's capabilities gate, minus the ones written out by hand."""
+    gated = [name for cap in spec.capabilities for name in CAPABILITY_ACTIONS.get(cap, ())]
+    return [n for n in dict.fromkeys(gated) if n in _GENERIC_FORWARDERS and n not in exclude]
+
+
+def _api_generic_block(spec: Spec, exclude: frozenset[str] = frozenset()) -> str:
+    """One-line forwarders for every generic action, grouped nowhere: order follows capability."""
+    lines: list[str] = []
+    for name in _generic_action_names(spec, exclude):
+        params, args, returns = _GENERIC_FORWARDERS[name]
+        sig = f"self, {params}" if params else "self"
+        lines += [
+            f"@implements({name.upper()})",
+            f"def {name}({sig}) -> {returns}:",
+            f"    return defaults.{name}(self{', ' + args if args else ''})",
+            "",
+        ]
+    return _block(lines, 4)
+
+
+def _api_spec_imports(spec: Spec, extra: list[str], exclude: frozenset[str] = frozenset()) -> list[str]:
+    """The ``ActionSpec`` constants the generated file binds, one import line each."""
+    names = [n.upper() for n in _generic_action_names(spec, exclude)] + extra
+    return sorted(dict.fromkeys(names))
+
+
+def _hand_written_specs(spec: Spec) -> list[str]:
+    """Specs bound by a hand-written body rather than a one-line forwarder."""
+    written = ["GET_POSE", "GOTO_XYZR"]
+    if spec.detection:
+        written += ["GET_GRASP_INFO_SIMPLE", "PIXEL_TO_BASE_XYZ", "ANALYZE_SCENE"]
+    return written
 
 
 def _effective_tilted(spec: Spec) -> bool:
@@ -300,7 +360,7 @@ def _detection_config_fields() -> str:
         # ============== 检测校正 [选填-仅 vision.detection] ==============
         z_correction_mm: float = 0.0        # Z 向常值校正
         grasp_z_offset_mm: float = -25.0    # 抓取点相对物体顶面偏移
-        place_z_offset_mm: float = 75.0     # 堆叠放置偏移
+        chip_thickness_mm: float = 75.0     # 堆叠放置偏移
         detector_url: str = "http://127.0.0.1:8114"  # 检测服务地址
         calib_path: Optional[str] = None    # 手眼标定文件 (JSON)
         """,
@@ -337,7 +397,7 @@ def _config_optional_fields(spec: Spec) -> str:
             _indent(
                 """
                 # ============== 关节软限位 [选填-仅 motion.joint] ==============
-                # 单位须与 move_joint(q) 一致。
+                # 单位须与 move_joint 的 targets 一致。
                 joint_limits: Optional[dict[str, tuple[float, float]]] = None
                 """,
                 4,
@@ -629,7 +689,7 @@ def render_lowlevel(spec: Spec) -> str:
 
         Replace each mock method body (marked with the sentinel comment) with
         your real SDK calls (serial / CAN / socket). A plain class satisfying the
-        RobotDriver Protocol (adapters/_common/protocol.py) — Env verbs delegate here.
+        CartesianDriver Protocol (env/protocol.py) — Env verbs delegate here.
         """
 
         from __future__ import annotations
@@ -767,9 +827,20 @@ def _env_joint_limits_prop(spec: Spec) -> str:
         @joint_limits.setter
         def joint_limits(self, _: Optional[dict[str, tuple[float, float]]]) -> None:
             raise AttributeError(f"{type(self).__name__}.joint_limits is read-only (read from config)")
+
+        # Joint names in driver-vector order: the shared ``move_joint`` action addresses joints
+        # by NAME and the driver takes a vector, so this is the ordering between them. Rename
+        # these to your vendor's own names — and keep ``joint_limits``' keys in step.
+        @property
+        def joint_names(self) -> Optional[list[str]]:
+            return __JOINT_NAMES__
+
+        @joint_names.setter
+        def joint_names(self, _: Optional[list[str]]) -> None:
+            raise AttributeError(f"{type(self).__name__}.joint_names is read-only")
         """,
-        8,
-    )
+        4,
+    ).replace("__JOINT_NAMES__", repr([f"J{i + 1}" for i in range(spec.dof)]))
 
 
 def render_env(spec: Spec) -> str:
@@ -795,7 +866,7 @@ def render_env(spec: Spec) -> str:
         """{spec.env_cls} — hardware abstraction wrapping {spec.driver_cls}.
 
         connect() creates self.low_level; Env verbs (home / move_to_flange / ...)
-        delegate to it. See docs/zh/how-to/port-hardware-adapter.md.
+        delegate to it. See docs/hardware-porting-guide.md Step 3.
         """
 
         from __future__ import annotations
@@ -856,6 +927,13 @@ def render_env(spec: Spec) -> str:
         __CAMERA_OBSERVATION__
                 return RobotObservation(pose=pose, rgb=rgb, depth=depth)
 
+            # ---------------------------------------------------- safe posture
+            def home(self) -> None:
+                """Return the body to its safe home posture (blocking). REQUIRED —
+                ``home`` is the one unconditional action, so every body states its own.
+                """
+                self._require_cartesian().home()
+
             # ----------------------------------------------- safety boundaries
             @property
             def z_min_safe(self) -> float:
@@ -898,20 +976,27 @@ def render_env(spec: Spec) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _api_imports(mixins: list[str], tilted: bool) -> str:
+def _api_imports(spec: Spec, mixins: list[str], tilted: bool, action_specs: list[str]) -> str:
     lines = ["from __future__ import annotations", ""]
     if tilted:
         lines += ["import math", ""]
     lines += [
         "from types import SimpleNamespace",
-        "from typing import Any, Optional",
+        "from typing import Any, Literal, Optional",
         "",
-        "from jiuwensymbiosis.api.base import BaseRobotApi",
-        "from jiuwensymbiosis.api.decorators import robot_tool",
-        "from jiuwensymbiosis.api.mixins import (",
-        *(f"    {mixin}," for mixin in mixins),
+        "from jiuwensymbiosis.api import defaults",
+        "from jiuwensymbiosis.api.actions import (",
+        *(f"    {name}," for name in action_specs),
+        "    implements,",
         ")",
+        "from jiuwensymbiosis.api.base import BaseRobotApi",
     ]
+    if mixins:
+        lines += [
+            "from jiuwensymbiosis.api.components import (",
+            *(f"    {mixin}," for mixin in mixins),
+            ")",
+        ]
     return "\n".join(lines)
 
 
@@ -925,13 +1010,13 @@ def _api_detection_init() -> str:
             detector_service_url: str = "http://127.0.0.1:8114",
             z_correction_mm: float = 0.0,
             grasp_z_offset_mm: float = -25.0,
-            place_z_offset_mm: float = 75.0,
+            chip_thickness_mm: float = 75.0,
         ) -> None:
             super().__init__(env)
             self._detector_service_url = detector_service_url
             self._z_correction_mm = float(z_correction_mm)
             self._grasp_z_offset_mm = float(grasp_z_offset_mm)
-            self._place_z_offset_mm = float(place_z_offset_mm)
+            self._chip_thickness_mm = float(chip_thickness_mm)
             self._seg_fn = None
         """,
         4,
@@ -942,23 +1027,30 @@ def _api_vision_block() -> str:
     return _indent(
         f"""
         # ----------------------------------------------------------- Vision
-        # Stubs return a serializable placeholder so the adapter passes
-        # smoke; replace each body (see docs §6.4 and piper/api.py).
-        @robot_tool(desc="Detect object_name, project to base XYZ. Returns {{ok, position, grasp_z, ...}}.")
+        # These have no generic default (they need YOUR calibration), so the stubs
+        # return a serializable placeholder to pass smoke; replace each body
+        # (see docs §6.4 and piper/api.py). The contract is fixed by the spec.
+        @implements(GET_GRASP_INFO_SIMPLE)
         def get_grasp_info_simple(self, object_name: str) -> dict:
             \"\"\"Detect object_name and return grasp geometry.
 
-            Recommended: implement ``_project_pixel_to_base_raw`` (the projection
-            seam) and inherit this method from VisionMixin instead of overriding
-            it — the shared pipeline runs detect -> project -> correct ->
-            grasp/place geometry for you. This stub keeps the adapter smoke-clean
-            until you wire the detector + calibration; see piper/api.py for a
-            worked eye-in-hand example.
+            Reference shape::
+
+                frames = self.env.low_level.grab_frames()
+                if frames is None:
+                    return {{"ok": False, "object": object_name, "reason": "no_camera"}}
+                rgb, depth_m = frames
+                detector_result = run_detector(rgb, object_name)
+                u, v = detector_result.pixel_uv
+                xyz = self.pixel_to_base_xyz(u, v, depth_m[v, u])
+                return build_grasp_result(object_name, xyz, detector_result)
+
+            For eye-in-hand RGB-D, compare piper/api.py and _common/vision.py.
             \"\"\"
             {SENTINEL}
             return {{"ok": False, "object": object_name, "reason": "not_implemented"}}
 
-        @robot_tool(desc="Convert pixel (u,v) at depth_m to base XYZ mm.")
+        @implements(PIXEL_TO_BASE_XYZ)
         def pixel_to_base_xyz(self, u: float, v: float, depth_m: float) -> dict:
             \"\"\"Convert image pixel + depth to base-frame XYZ in mm.
 
@@ -975,7 +1067,7 @@ def _api_vision_block() -> str:
             {SENTINEL}
             return {{"ok": False, "reason": "not_implemented"}}
 
-        @robot_tool(desc="Higher-level scene analysis grounded on object_name.")
+        @implements(ANALYZE_SCENE)
         def analyze_scene(self, object_name: Optional[str] = None) -> dict:
             \"\"\"Return a lightweight scene summary.
 
@@ -1006,7 +1098,6 @@ def render_api(spec: Spec) -> str:
         )
     get_items = ['"x": p.x', '"y": p.y', '"z": p.z - tool_off']
     get_items += [f'"{field}": getattr(p, "{field}", 0.0)' for field in spec.rot_fields]
-    home_items = ", ".join(f'"{field}": getattr(hp, "{field}", 0.0)' for field in spec.pose_fields)
     r_default = (
         'r = getattr(self.env.get_flange_pose(), "r", 0.0)'
         if spec.dof == 4
@@ -1040,13 +1131,17 @@ def render_api(spec: Spec) -> str:
             8,
         )
 
+    bases = _block([f"{mixin}," for mixin in mixins], 4)
     return _render(
         f'''
-        """{spec.api_cls} — capability-mixin API for the {spec.name} robot.
+        """{spec.api_cls} — what the {spec.name} robot does, action by action.
 
-        Motion / grasp / get_image inherit working defaults that delegate to the
-        Env verbs; only the offset/tilt geometry and (if any) the vision methods
-        are overridden here. See docs/zh/how-to/port-hardware-adapter.md.
+        Every method binds one entry of the shared action vocabulary with
+        ``@implements(SPEC)``: the contract (name, capability gate, params, result,
+        pre-conditions) comes from that spec, so a plan written for another body means
+        the same thing here. Generic actions forward to ``api.defaults`` in one line;
+        only the tip↔flange geometry and (if any) the vision methods are real work.
+        ``home`` is inherited from BaseRobotApi. See docs/hardware-porting-guide.md Step 4.
         """
 
         __IMPORTS__
@@ -1061,39 +1156,39 @@ def render_api(spec: Spec) -> str:
         __INIT_BLOCK__
 
             # ----------------------------------------------------------- Motion
-            @robot_tool(desc="Return {spec.name} to its home pose.", tags=["motion"])
-            def home(self) -> None:
-                """Return to the home pose (motion command → Env verb)."""
-                self.env.home()
-
-            @robot_tool(desc="Get current TIP pose (mm/deg, base frame).")
+            @implements(GET_POSE)
             def get_pose(self) -> dict:
                 """Current tip pose (flange pose minus the tool offset)."""
                 p = self.env.get_flange_pose()
                 tool_off = self.env.tool_offset_mm
                 return {{{", ".join(get_items)}}}
 
-            @robot_tool(desc="Get the home pose constants (read-only).")
-            def get_home_pose(self) -> dict:
-                """Home pose constants read from the env."""
-                hp = self.env.home_pose
-                return {{{home_items}}}
+            @implements(GOTO_XYZR)
+            def goto_xyzr(self, x: float, y: float, z: float, r: Optional[float] = None,
+                          orientation_policy: Literal["top_down"] = "top_down") -> None:
+                """Move tip to target. tip↔flange geometry stays in the api layer.
 
-            @robot_tool(desc="Move the TIP to absolute (x, y, z[, r]) in mm/deg, base frame.", tags=["motion"])
-            def goto_xyzr(self, x: float, y: float, z: float, r: Optional[float] = None) -> None:
-                """Move tip to target. tip↔flange geometry stays in the api layer."""
+                TODO: add "preserve" (keep the live tilt) once the tip↔flange conversion below
+                stops assuming a fixed orientation. The Literal is what tells a planner which
+                policies THIS body accepts, so widen it only when the body really honours them.
+                """
+                if orientation_policy != "top_down":
+                    raise ValueError(f"goto_xyzr: only 'top_down' is implemented, got {{orientation_policy!r}}")
                 tool_off = self.env.tool_offset_mm
                 if r is None:
         __R_DEFAULT__
         __POSE_BUILD__
                 self.env.move_to_flange(pose)
 
+        __GENERIC_BLOCK__
+
         __VISION_BLOCK__
         ''',
-        IMPORTS=_api_imports(mixins, tilted),
+        IMPORTS=_api_imports(spec, mixins, tilted, _api_spec_imports(spec, _hand_written_specs(spec))),
         CONSTANTS=constants,
-        MIXIN_BASES=_block([f"{mixin}," for mixin in mixins], 4),
+        MIXIN_BASES=bases,
         INIT_BLOCK=_api_detection_init() if spec.detection else "",
+        GENERIC_BLOCK=_api_generic_block(spec),
         R_DEFAULT=_block([r_default], 12),
         POSE_BUILD=pose_build,
         VISION_BLOCK=_api_vision_block() if spec.detection else "",
@@ -1129,7 +1224,7 @@ def render_session(spec: Spec) -> str:
                 "detector_url:detector_service_url",
                 "z_correction_mm",
                 "grasp_z_offset_mm",
-                "place_z_offset_mm",
+                "chip_thickness_mm",
             ],
         )
 
@@ -1244,7 +1339,7 @@ def render_yaml(spec: Spec) -> str:
         lines += [
             "",
             "# ---- 关节软限位 [选填-仅 motion.joint] ----",
-            "# 单位须与 move_joint(q) 一致；键顺序 = q 索引顺序 (按 J1/J2/... 写)。",
+            "# 单位须与 move_joint 的 targets 一致；键即关节名，顺序 = 驱动向量的索引顺序。",
             "# 限位值以官方手册为准，示例仅为占位。未配置则 SafetyRail 跳过越限检查。",
             "# joint_limits:",
             "#   J1: [-360.0, 360.0]",
@@ -1270,7 +1365,7 @@ def render_yaml(spec: Spec) -> str:
             "# ---- 检测 ----",
             "z_correction_mm: 0.0",
             "grasp_z_offset_mm: -25.0",
-            "place_z_offset_mm: 75.0",
+            "chip_thickness_mm: 75.0",
             'detector_url: "http://127.0.0.1:8114"',
             "# calib_path: calib.json",
         ]
@@ -1371,7 +1466,7 @@ def render_config_joint_ik(spec: Spec) -> str:
         __CONNECTION_FIELDS__
 
             # ==================== 运动学关节 [必填] ====================
-            # 不含夹爪；顺序即 move_joint(q) / FK / IK 的顺序。
+            # 不含夹爪；顺序即驱动向量 / FK / IK 的顺序，也是 joint_names 的顺序。
             arm_joint_names: list[str] = field(default_factory=lambda: {_joint_names_literal(spec)})
             home_joints_deg: list[float] = field(default_factory=lambda: {_home_zeros_literal(spec)})
             joint_limits: Optional[dict[str, tuple[float, float]]] = None
@@ -1726,6 +1821,13 @@ def render_env_joint_ik(spec: Spec) -> str:
         __EFFECTOR_EXTRA__
                 return RobotObservation(pose=pose, joints=joints, rgb=rgb, depth=depth, extra=extra)
 
+            # ---------------------------------------------------- safe posture
+            def home(self) -> None:
+                """Return the body to its safe home posture (blocking). REQUIRED —
+                ``home`` is the one unconditional action, so every body states its own.
+                """
+                self._require_cartesian().home()
+
             # ----------------------------------------------- safety boundaries
             @property
             def z_min_safe(self) -> float:
@@ -1760,6 +1862,16 @@ def render_env_joint_ik(spec: Spec) -> str:
             def joint_limits(self, _: Any) -> None:
                 raise AttributeError(f"{{type(self).__name__}}.joint_limits is read-only (from config)")
 
+            # Arm joint names in vector order — what the named ``move_joint`` action addresses,
+            # and the ordering the Env converts to the driver's vector with.
+            @property
+            def joint_names(self) -> Optional[list]:
+                return list(self._cfg.arm_joint_names)
+
+            @joint_names.setter
+            def joint_names(self, _: Any) -> None:
+                raise AttributeError(f"{{type(self).__name__}}.joint_names is read-only (from config)")
+
             # -------------------------------------------- robot body constants
             @property
             def home_pose(self):
@@ -1789,33 +1901,37 @@ def render_env_joint_ik(spec: Spec) -> str:
     )
 
 
-def _api_imports_joint_ik(mixins: list[str]) -> str:
-    mixin_import = "\n".join(f"    {mixin}," for mixin in mixins)
-    return (
-        "from __future__ import annotations\n\n"
-        "from types import SimpleNamespace\n"
-        "from typing import Optional\n\n"
-        "from jiuwensymbiosis.api.base import BaseRobotApi\n"
-        "from jiuwensymbiosis.api.decorators import robot_tool\n"
-        "from jiuwensymbiosis.api.mixins import (\n"
-        f"{mixin_import}\n"
-        ")"
-    )
+def _api_imports_joint_ik(mixins: list[str], action_specs: list[str]) -> str:
+    lines = [
+        "from __future__ import annotations",
+        "",
+        "from types import SimpleNamespace",
+        "from typing import Any, Literal, Optional",
+        "",
+        "from jiuwensymbiosis.api import defaults",
+        "from jiuwensymbiosis.api.actions import (",
+        *(f"    {name}," for name in action_specs),
+        "    implements,",
+        ")",
+        "from jiuwensymbiosis.api.base import BaseRobotApi",
+    ]
+    if mixins:
+        lines += ["from jiuwensymbiosis.api.components import (", *(f"    {mixin}," for mixin in mixins), ")"]
+    return "\n".join(lines)
 
 
 def _api_goto_joint_ik(spec: Spec) -> str:
-    if spec.orientation_mode == "soft":
-        desc = (
-            "Move the TIP to absolute (x, y, z[, r]) in mm/deg, base frame. "
-            "Underactuated arm: position is enforced, orientation is best-effort."
-        )
-    else:
-        desc = "Move the TIP to absolute (x, y, z[, r]) in mm/deg, base frame."
     return _indent(
         f'''
-        @robot_tool(desc="{desc}", tags=["motion"])
-        def goto_xyzr(self, x: float, y: float, z: float, r: Optional[float] = None) -> None:
-            """Position-first Cartesian move; the local IK handles posture."""
+        @implements(GOTO_XYZR)
+        def goto_xyzr(self, x: float, y: float, z: float, r: Optional[float] = None,
+                      orientation_policy: Literal["top_down"] = "top_down") -> None:
+            """Position-first Cartesian move; the local IK handles posture.
+
+            TODO: add "preserve" (keep the live tilt) — the pose below hard-codes rx/ry.
+            """
+            if orientation_policy != "top_down":
+                raise ValueError(f"goto_xyzr: only 'top_down' is implemented, got {{orientation_policy!r}}")
             if r is None:
                 r = getattr(self.env.get_flange_pose(), "rz", 0.0)
             pose = SimpleNamespace(x=float(x), y=float(y), z=float(z), rx=180.0, ry=0.0, rz=float(r))
@@ -1830,29 +1946,16 @@ def _api_gripper_joint_ik(spec: Spec) -> str:
         return ""
     return _indent(
         """
-        # Two-state gripper: the ToolCard exposes NO width/force (honest for a
-        # position-only effector); the mixin-parity args are accepted but ignored.
-        @robot_tool(
-            desc="Open the gripper to its configured open position.",
-            capability="grasp.parallel",
-            input_params={"type": "object", "properties": {}},
-            tags=["grasp"],
-        )
+        # Two-state gripper: width_mm / force_n are accepted for contract parity and ignored,
+        # which is honest for a position-only effector. The CONTRACT already calls both a hint,
+        # so this needs no per-body caveat.
+        @implements(OPEN_GRIPPER)
         def open_gripper(self, width_mm: float = 80.0) -> dict:
-            \"\"\"Open to the configured open position (width_mm ignored).\"\"\"
-            self.env.set_end_effector(False)
-            return {"ok": True, "state": "open"}
+            return defaults.open_gripper(self, width_mm)
 
-        @robot_tool(
-            desc="Close the gripper to its configured close position.",
-            capability="grasp.parallel",
-            input_params={"type": "object", "properties": {}},
-            tags=["grasp"],
-        )
+        @implements(CLOSE_GRIPPER)
         def close_gripper(self, force_n: Optional[float] = None) -> dict:
-            \"\"\"Close to the configured close position (force_n ignored).\"\"\"
-            self.env.set_end_effector(True)
-            return {"ok": True, "state": "closed"}
+            return defaults.close_gripper(self, force_n)
         """,
         4,
     )
@@ -1860,16 +1963,23 @@ def _api_gripper_joint_ik(spec: Spec) -> str:
 
 def render_api_joint_ik(spec: Spec) -> str:
     mixins = _mixin_names(spec)
+    # The gripper pair is written out (its args are accepted and ignored), so it is
+    # excluded from the generic block rather than emitted twice.
+    exclude = frozenset({"open_gripper", "close_gripper"}) if spec.end_effector == "parallel" else frozenset()
+    written = ["GET_POSE", "GOTO_XYZR", *sorted(n.upper() for n in exclude)]
+    if spec.detection:
+        written += ["GET_GRASP_INFO_SIMPLE", "PIXEL_TO_BASE_XYZ", "ANALYZE_SCENE"]
     return _render(
         f'''
-        """{spec.api_cls} — capability-mixin API for the joint-level {spec.name} arm.
+        """{spec.api_cls} — what the joint-level {spec.name} arm does, action by action.
 
-        Motion / joint / gripper / suction / vision inherit the mixin defaults that
-        delegate to the Env verbs (the KinematicArmDriver does the IK and forwards
-        the camera). Only the honest soft-posture goto and, for a parallel gripper,
-        the two-state card are specialized; the vision stubs are the same the rest
-        of the framework generates (fill them with your detector, or implement the
-        VisionMixin projection seam _project_pixel_to_base_raw — see piper/api.py).
+        Every method binds one entry of the shared action vocabulary with
+        ``@implements(SPEC)``; the contract comes from the spec, never from here.
+        The generic ones forward to ``api.defaults`` (the KinematicArmDriver does the
+        IK and forwards the camera, so the Env verbs are enough). Only the honest
+        soft-posture goto and the vision stubs are real work — fill the latter with
+        your detector, or wire perception.vision.default_get_grasp_info_simple with
+        the driver's FK pose. ``home`` is inherited from BaseRobotApi.
         """
 
         __IMPORTS__
@@ -1882,15 +1992,24 @@ def render_api_joint_ik(spec: Spec) -> str:
             """Robot API for the {spec.name} joint-level arm."""
 
         __INIT_BLOCK__
+
+            @implements(GET_POSE)
+            def get_pose(self) -> dict:
+                """Current tip pose, as the driver's FK reports it."""
+                return defaults.get_pose(self)
+
         __GOTO_OVERRIDE__
         __GRIPPER_OVERRIDE__
+        __GENERIC_BLOCK__
+
         __VISION_BLOCK__
         ''',
-        IMPORTS=_api_imports_joint_ik(mixins),
+        IMPORTS=_api_imports_joint_ik(mixins, _api_spec_imports(spec, written, exclude)),
         MIXIN_BASES=_block([f"{mixin}," for mixin in mixins], 4),
         INIT_BLOCK=_api_detection_init() if spec.detection else "",
         GOTO_OVERRIDE=_api_goto_joint_ik(spec),
         GRIPPER_OVERRIDE=_api_gripper_joint_ik(spec),
+        GENERIC_BLOCK=_api_generic_block(spec, exclude),
         VISION_BLOCK=_api_vision_block() if spec.detection else "",
     )
 
@@ -1906,7 +2025,7 @@ def render_yaml_joint_ik(spec: Spec) -> str:
         f'connection: "{spec.connection}"',
         *_yaml_connection_lines(spec),
         "",
-        "# ---- 运动学关节 (不含夹爪; 顺序=move_joint/FK/IK 顺序) [必填] ----",
+        "# ---- 运动学关节 (不含夹爪; 顺序=驱动向量/FK/IK 顺序) [必填] ----",
         f"arm_joint_names: [{', '.join(repr(n) for n in spec.arm_joint_names)}]",
         f"home_joints_deg: [{', '.join('0.0' for _ in range(spec.joint_count))}]",
         "# joint_limits: (单位=度; 键须与 arm_joint_names 一致; 不填则跳过越限检查)",
@@ -1960,7 +2079,7 @@ def render_yaml_joint_ik(spec: Spec) -> str:
             "# ---- 检测 (手眼标定+检测服务; 未标定前视觉工具是诚实占位) ----",
             "z_correction_mm: 0.0",
             "grasp_z_offset_mm: -25.0",
-            "place_z_offset_mm: 75.0",
+            "chip_thickness_mm: 75.0",
             'detector_url: "http://127.0.0.1:8114"',
             "# calib_path: calib.json",
         ]

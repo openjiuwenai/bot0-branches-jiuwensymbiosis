@@ -52,7 +52,7 @@ class FieldSpec:
             ``min`` / ``max`` —— 上下箭头步进不会越界(如温度限 [0, 2])。
         step: 数字类字段每次步进的增量(缺省走控件默认 1;如温度用 0.1)。
         on_value / off_value: ``kind="bool"`` 时若给出,复选框存的不是 True/False
-            而是这两个值(如 exec_mode 的 ``"fast"`` / ``"agent"``)。
+            而是这两个值(如 exec_mode 的 ``"fastagent"`` / ``"stepagent"``)。
     """
 
     path: str
@@ -100,13 +100,13 @@ FIELD_GROUPS: tuple[FieldSpec, ...] = (
     ),
     FieldSpec(
         "agent.exec_mode",
-        "快速模式(fast)",
+        "快速模式(fastagent)",
         "bool",
         "执行方式",
         help=("开启快速模式后，会在开始时用一次 LLM 规划出整条动作序列并直接执行。"),
-        default="fast",
-        on_value="fast",
-        off_value="agent",
+        default="fastagent",
+        on_value="fastagent",
+        off_value="stepagent",
     ),
     # -- 安全与反馈 --
     FieldSpec(

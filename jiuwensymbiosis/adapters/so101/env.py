@@ -28,7 +28,7 @@ from jiuwensymbiosis.env.protocol import HandGuidingDriver
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from jiuwensymbiosis.adapters.so101.lowlevel import So101Driver
-    from jiuwensymbiosis.env.protocol import RobotDriver
+    from jiuwensymbiosis.env.protocol import CartesianDriver
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +51,13 @@ class So101Env(BaseRobotEnv):
             "vision.eye_to_hand",
         }
     )
-    _BASE_CAPABILITIES = frozenset({"motion.cartesian", "motion.joint", "grasp.parallel", "motion.servo"})
+    _BASE_CAPABILITIES = frozenset(
+        {"motion.cartesian", "motion.joint", "grasp.parallel", "motion.servo"}
+    )
     name = "so101"
+    # Native SOFollower units: joints in degrees (see lowlevel: "Joints in degrees,
+    # gripper in 0..100 %"), which is what ``home_joints_deg`` / ``joint_limits`` carry.
+    _joint_units = "deg"
 
     def __init__(self, cfg: So101Config) -> None:
         """Store config; driver is None until connect()."""
@@ -83,13 +88,20 @@ class So101Env(BaseRobotEnv):
 
     # --- controlled penetration point (read-only) ---------------------------
     @property
-    def low_level(self) -> RobotDriver | None:
+    def low_level(self) -> CartesianDriver | None:
         """The underlying driver, or None before connect()."""
         return self._inner
 
     @low_level.setter
-    def low_level(self, _: RobotDriver | None) -> None:
-        raise AttributeError("So101Env.low_level is read-only (binds to self._inner via connect/disconnect)")
+    def low_level(self, value: CartesianDriver | None) -> None:
+        """Bind a driver before connect() — the seam a smoke test or a simulator uses.
+
+        Once one is bound, only connect/disconnect may rebind it: that is the invariant the
+        binding protects, and it holds whether the driver came from connect() or from here.
+        """
+        if self._inner is not None:
+            raise AttributeError("So101Env.low_level is already bound — connect/disconnect owns rebinding")
+        self._inner = value
 
     @property
     def last_gripper_result(self) -> dict[str, Any] | None:
@@ -155,6 +167,16 @@ class So101Env(BaseRobotEnv):
     def joint_limits(self, _: dict[str, tuple[float, float]] | None) -> None:
         raise AttributeError("So101Env.joint_limits is read-only (computed from config)")
 
+    @property
+    def default_orientation_policy(self) -> str | None:
+        """The configured ``cartesian_orientation_policy`` (ships as ``preserve``).
+
+        Read from the live config rather than declared as a constant, because this is exactly
+        the value the action schema cannot carry: it is a per-workcell setting, and a planner
+        that assumed ``top_down`` would approach a grasp sideways without any error being raised.
+        """
+        return getattr(self.cfg, "cartesian_orientation_policy", None)
+
     # --- robot body constants -----------------------------------------------
     @property
     def home_pose(self) -> So101Pose | None:
@@ -218,6 +240,10 @@ class So101Env(BaseRobotEnv):
         self._inner = None
         self._connected = False
         self.capabilities = self._capabilities_for_config()
+
+    def home(self) -> None:
+        """Move the arm to its home pose (blocking) — the FK of ``home_joints_deg``."""
+        self._require_cartesian().home()
 
     # -------------------------------------------------------------- observation
     def get_observation(self) -> RobotObservation:
@@ -287,8 +313,8 @@ class So101Env(BaseRobotEnv):
         """Dispatch a flange-frame Cartesian move to the driver.
 
         ``So101Driver.move_to_pose_blocking`` requires a :class:`So101Pose`; the
-        generic capability mixins (:meth:`MotionMixin.goto_xyzr`,
-        :meth:`MotionMixin.move_direction`) hand a ``SimpleNamespace`` here, so
+        generic implementations (``defaults.goto_xyzr`` / ``defaults.move_direction``)
+        hand a ``SimpleNamespace`` here, so
         normalize a complete mapping or attribute-bag pose into a ``So101Pose``
         before delegating. Missing coordinates are rejected instead of silently
         becoming zero-valued hardware targets. A ``So101Pose`` is passed through.

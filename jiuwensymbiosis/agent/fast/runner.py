@@ -7,7 +7,7 @@ Executes an ordered ``list[ActionStep]`` (produced once by the skill-selection
 LLM, see ``fast_path_single_source_design.md``) against a live session. It is
 **task-agnostic** — it knows nothing about pick/place/carry/push; it only knows:
 
-  * how to call any ``@robot_tool`` action by name (the same ``_build_action_index``
+  * how to call any ``@implements`` action by name (the same ``_build_action_index``
     the agent's ``robot_control`` uses), so whatever a robot/skill exposes runs;
   * how to evaluate a step's symbolic params against a variable environment
     (config constants + detection bindings) via ``sequence.resolve_params``;
@@ -21,6 +21,7 @@ here. Adding a new task = adding a SKILL.md; this runner is unchanged.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 import time
@@ -37,12 +38,18 @@ from jiuwensymbiosis.agent.fast.sequence import (
     TRACK_DETECT,
     TRACK_GRASP,
     ActionStep,
+    LoopStep,
     normalize_detection,
+    referenced_binding_names,
     resolve_params,
 )
+from jiuwensymbiosis.api.decorators import ToolMeta
+from jiuwensymbiosis.api.memory import ExecutionMemory
+from jiuwensymbiosis.api.state import contradicted_requirements
+from jiuwensymbiosis.api.world_state import WorldState, current_tokens
 from jiuwensymbiosis.errors import DetectionError, GraspNotConfirmedError, JiuwenSymbiosisError, error_code
 from jiuwensymbiosis.rails.recovery import read_holding_payload, recover_session
-from jiuwensymbiosis.tools.robot_control_tool import _build_action_index
+from jiuwensymbiosis.tools.robot_control_tool import _build_action_index, record_action
 
 logger = logging.getLogger(__name__)
 
@@ -222,11 +229,20 @@ def _prescan(session: Any, steps: list[ActionStep]) -> dict[str, dict[str, Any]]
     objects the sequence names. Only ``track_detect`` reads this cache: the
     eye-to-hand ``track_grasp`` drives from absolute base-frame coordinates
     each tick and never consults a home-pose snapshot, so it is excluded here.
+
+    These calls go straight to the api rather than through the executor, so they
+    record into ``ExecutionMemory`` here: they home the body and sense positions like
+    any other step, and a sensing the memory never hears about leaves it looking empty
+    to ``_location_drift``, which reads emptiness as "everything was invalidated".
+    Deliberately NOT recorded: the same detection run from a ``BackgroundTracker`` tick
+    (``track_detect`` / ``track_grasp``), which fires at ``detect_hz`` — that is a
+    control loop sampling, not a step the plan took, and folding it in would churn the
+    memory at servo rate.
     """
     api = session.api
     names: list[str] = []
     for s in steps:
-        if s.op == TRACK_DETECT:
+        if isinstance(s, ActionStep) and s.op == TRACK_DETECT:
             n = s.params.get("object_name")
             if isinstance(n, str) and n and n not in names:
                 names.append(n)
@@ -235,12 +251,14 @@ def _prescan(session: Any, steps: list[ActionStep]) -> dict[str, dict[str, Any]]
         return cache
     try:
         api.home()
+        record_action(api, api.home, {}, None)
     except Exception as exc:  # noqa: BLE001 - pre-scan home() is best-effort
         logger.warning("[runner] pre-scan: home() failed: %s", exc)
     for n in names:
         det = _detect_once(api, n)
         if det is not None:
             cache[n] = det
+            record_action(api, api.get_grasp_info_simple, {"object_name": n}, det)
             logger.info("[runner] pre-scan cached %r at home: pos=%s", n, det.get("position"))
         else:
             logger.warning("[runner] pre-scan: %r not detected at home (will retry live)", n)
@@ -565,6 +583,11 @@ def _wait_post_descend_target(
 # agent uses (Safety/VisualFeedback/Recovery); tests pass a direct one.
 Executor = Callable[[str, dict[str, Any]], dict[str, Any]]
 
+# Asked for a replacement remainder when the measured world has drifted away from
+# what the plan assumed. Receives the measured state and why the plan no longer
+# fits; returns the new steps, or ``None`` to leave the original plan alone.
+Replanner = Callable[[WorldState, str], "list[ActionStep | LoopStep] | None"]
+
 
 class _StepExecutionError(JiuwenSymbiosisError, RuntimeError):
     """Primitive-op failure with recovery ownership metadata."""
@@ -606,6 +629,12 @@ def direct_executor(api_or_index: Any) -> Executor:
     """A no-rails executor that calls api methods directly (mock / tests).
 
     Accepts an api object or a prebuilt ``{op: method}`` index.
+
+    No rails, but it still records into ``ExecutionMemory``: skipping that would make
+    this the one dispatch path where a base move stales the planner's locations but not
+    the api's sensing cache, so a mock run and a railed run would disagree about whether
+    a location exists. The api comes off the bound method, since an index carries no
+    reference back to it.
     """
     idx = api_or_index if isinstance(api_or_index, Mapping) else _build_action_index(api_or_index)
 
@@ -617,10 +646,16 @@ def direct_executor(api_or_index: Any) -> Executor:
             result = fn(**params)
         except Exception as exc:  # noqa: BLE001 - convert op failure to structured result
             return {"ok": False, "reason": f"{type(exc).__name__}: {exc}", "error_code": error_code(exc)}
+        api = getattr(fn, "__self__", None)
+        if api is not None:
+            record_action(api, fn, params, result)
         ok = result.get("ok", True) if isinstance(result, dict) else True
         return {"ok": ok, "result": result}
 
     return run
+
+
+_LOOP_HARD_CAP = 1000  # safety cap; real termination is "detect returns no target"
 
 
 @dataclass(frozen=True)
@@ -693,7 +728,8 @@ def _retry_unconfirmed_grasp(
 def _cancellable_executor(run_op: Executor, token: CancelToken) -> Executor:
     """Wrap an executor so each op checks the token first, then runs under
     ``cancellable_call`` — so a single long blocking op yields the worker within
-    one poll on cancel instead of blocking to completion."""
+    one poll on cancel instead of blocking to completion.
+    """
 
     def _run(op: str, params: dict[str, Any]) -> dict[str, Any]:
         token.raise_if_set()
@@ -702,13 +738,319 @@ def _cancellable_executor(run_op: Executor, token: CancelToken) -> Executor:
     return _run
 
 
+def _resolve_dict_bindings(op: str, params: dict, env: Mapping[str, Any], api: Any) -> dict:
+    """Turn a param that names a whole detection binding into that binding dict.
+
+    ``resolve_params`` handles scalars (``<bind>.field``); a whole-binding reference
+    like ``box="white_crate"`` stays a literal string there. Here we upgrade it to the
+    bound dict — but **only for params annotated as a dict** (``box`` / ``surface`` are
+    ``Optional[dict]``), so a ``str`` param such as ``object_name`` that happens to
+    equal a bind name stays a literal (no collision). This makes explicit detection
+    references order-independent — no reliance on the cached last detection.
+    """
+    fn = getattr(api, op, None)
+    if fn is None:  # e.g. TRACK_DETECT (not an api method) → nothing to upgrade
+        return params
+    try:
+        annotations = {n: str(p.annotation) for n, p in inspect.signature(fn).parameters.items()}
+    except (TypeError, ValueError):
+        return params
+    out = dict(params)
+    for key, val in params.items():
+        if isinstance(val, str) and "dict" in annotations.get(key, "").lower() and isinstance(env.get(val), Mapping):
+            out[key] = env[val]
+    return out
+
+
+@dataclass
+class _RunContext:
+    """Everything a step needs besides the step itself — one object so the per-step
+    helpers take (step, ctx) instead of eight positional arguments.
+
+    ``env`` / ``out`` / ``state`` are mutated in place by the helpers (bindings, the
+    step record, and the shared holding/index cursor), so they must stay the SAME
+    objects ``run_sequence`` holds, never copies.
+    """
+
+    env: dict
+    run_op: Executor
+    session: Any
+    cfg: SkillExecConfig
+    cache: dict
+    out: list[dict]
+    state: dict
+
+
+def _run_action(step: ActionStep, ctx: _RunContext) -> bool:
+    """Execute one ``ActionStep``; append its record to ``out``; return ok.
+
+    This is the upstream single-step semantics refactored out of ``run_sequence``
+    so the SAME executor drives both top-level steps and loop bodies. It preserves
+    the two compound track ops, grasp confirmation + retry, and the rail-aware
+    (``recovery_managed``) failure path, while reading/writing ``holding`` /
+    ``tracked_grasp`` / ``i`` through the shared ``state`` dict. ``_resolve_dict_bindings``
+    upgrades whole-binding params (``box`` / ``surface``) before dispatch.
+    """
+    env, run_op, session, cfg, cache, out, state = (
+        ctx.env, ctx.run_op, ctx.session, ctx.cfg, ctx.cache, ctx.out, ctx.state)
+    i = state["i"]
+    holding = state["holding"]
+    tracked_grasp: _TrackedGraspContext | None = state["tracked_grasp"]
+    # Cancellation (GUI-only): checked once per step here, and again inside every
+    # blocking wait below. None for CLI/tests → every call degrades to the plain
+    # synchronous path.
+    token: CancelToken | None = getattr(session, "cancel_token", None)
+    try:
+        if token is not None:
+            token.raise_if_set()
+        params = resolve_params(step.params, env)
+        params = _resolve_dict_bindings(step.op, params, env, session.api)
+        if step.op == TRACK_DETECT:
+            det = _track_detect(session, params["object_name"], cfg, cache, occluded=holding)
+            if det is None:
+                raise _track_miss_error(session, params["object_name"])
+            if step.bind:
+                env[step.bind] = det
+            result: Any = {"detected": det.get("position")}
+        elif step.op == TRACK_GRASP:
+            det = _track_grasp(session, params["object_name"], float(params["approach_mm"]), cfg)
+            if det is None:
+                raise _track_miss_error(session, params["object_name"])
+            if step.bind:
+                env[step.bind] = det
+            tracked_grasp = _TrackedGraspContext(
+                object_name=str(params["object_name"]),
+                approach_mm=float(params["approach_mm"]),
+                bind=step.bind,
+            )
+            result = {"detected": det.get("position"), "grasp_z": det.get("grasp_z")}
+        else:
+            res = run_op(step.op, params)
+            if not res.get("ok"):
+                _raise_executor_failure(res, f"{step.op} failed")
+            result = res.get("result")
+            if step.bind:
+                # A bind step must yield a usable detection; a detection that
+                # ran but returned ok=False (e.g. no valid depth at the target)
+                # would otherwise silently skip the bind and let a later
+                # "<bind>.field" reference reach a motion tool unresolved
+                # (a cryptic "str + float" crash). Abort here with the real cause.
+                if not (isinstance(result, dict) and result.get("ok")):
+                    reason = result.get("reason", "unknown") if isinstance(result, dict) else "no result"
+                    target = params.get("object_name", step.bind)
+                    raise DetectionError(
+                        f"detection for {target!r} produced no usable result (reason={reason}); "
+                        f"later steps read '{step.bind}.<field>' — aborting instead of crashing downstream",
+                        code=str(reason),
+                    )
+                env[step.bind] = normalize_detection(result)
+            if step.op in _GRIP_CLOSE_OPS:
+                sleep_cancellable(max(0.0, cfg.settle_grip_s), token)
+                confirmed = _grasp_confirmation(session.api, result)
+                # An empty close is a failure however the approach was planned.
+                # Only the RETRY needs a track_grasp context (it re-runs that op);
+                # without one the step still has to fail closed rather than let
+                # the sequence carry on placing an object it is not holding.
+                if confirmed is False:
+                    if tracked_grasp is not None and cfg.max_grasp_retries > 0:
+                        retry_det, result, retry_count = _retry_unconfirmed_grasp(
+                            session,
+                            tracked_grasp,
+                            cfg,
+                            run_op,
+                        )
+                        if tracked_grasp.bind:
+                            env[tracked_grasp.bind] = retry_det
+                        if isinstance(result, dict):
+                            result = {**result, "grasp_retry_attempts": retry_count}
+                        else:
+                            result = {"result": result, "grasp_retry_attempts": retry_count}
+                        confirmed = _grasp_confirmation(session.api, result)
+                    else:
+                        raise GraspNotConfirmedError("grasp_not_confirmed: gripper closed without object contact")
+                holding = confirmed is not False
+                tracked_grasp = None
+            elif step.op in _GRIP_OPEN_OPS:
+                holding = False
+                tracked_grasp = None
+                sleep_cancellable(max(0.0, cfg.settle_grip_s), token)
+        out.append({"i": i, "op": step.op, "ok": True, "result": result})
+        logger.info("[runner] step %d ok: %s(%s)", i, step.op, params)
+        state["i"] = i + 1
+        state["holding"] = holding
+        state["tracked_grasp"] = tracked_grasp
+        return True
+    except RunCancelled:
+        # User cancellation: do NOT record a failed step or run _safe_retreat
+        # (which would issue another home/release motion). Let it unwind to the
+        # GUI, which finalizes the run as "已停止".
+        raise
+    except Exception as exc:  # noqa: BLE001 - surface as structured failure
+        logger.warning("[runner] step %d failed: %s(%s): %s", i, step.op, step.params, exc)
+        if isinstance(exc, _StepExecutionError) and exc.recovery_managed:
+            logger.info("[runner] recovery already handled by the ability rail stack")
+        else:
+            _safe_retreat(session)
+        # ``reason`` is the human/LLM-facing text; ``error_code`` is the machine
+        # one the GUI looks up directly instead of re-deriving it from that text.
+        out.append(
+            {
+                "i": i,
+                "op": step.op,
+                "ok": False,
+                "reason": f"{type(exc).__name__}: {exc}",
+                "error_code": error_code(exc),
+            }
+        )
+        state["i"] = i + 1
+        return False
+
+
+def _run_loop(loop: LoopStep, ctx: _RunContext) -> bool:
+    """Perception-terminated loop: detect one target → run body → repeat until none.
+
+    Iteration count = however many targets exist (2→2, 100→100, 0→0). Re-detects
+    each pass (robust to objects moving); stops cleanly when detect finds no target.
+    """
+    env, run_op, session, out, state = ctx.env, ctx.run_op, ctx.session, ctx.out, ctx.state
+    cap = loop.max_iters if loop.max_iters else _LOOP_HARD_CAP
+    for _ in range(cap):
+        i = state["i"]
+        # 1. detect ONE target (single-target detector; ok=False ⇒ none left)
+        try:
+            det_res = run_op(loop.detect_op, resolve_params(loop.detect_params, env))
+        except RunCancelled:
+            raise  # user cancellation: no failed step, no _safe_retreat (see _run_action)
+        except Exception as exc:  # noqa: BLE001
+            _safe_retreat(session)
+            out.append({"i": i, "op": f"loop:{loop.detect_op}", "ok": False, "reason": f"{type(exc).__name__}: {exc}"})
+            state["i"] = i + 1
+            return False
+        det = det_res.get("result")
+        if not det_res.get("ok") or not (isinstance(det, dict) and det.get("ok")):
+            out.append({"i": i, "op": f"loop:{loop.detect_op}", "ok": True, "result": {"terminated": "no_more_target"}})
+            state["i"] = i + 1
+            return True  # clean termination — the scene is clear
+        env[loop.bind] = normalize_detection(det)
+        out.append({"i": i, "op": f"loop:{loop.detect_op}", "ok": True,
+                    "result": {"target": det.get("position") or det.get("center_mm")}})
+        state["i"] = i + 1
+        # 2. process this one target: run the body once
+        for bstep in loop.body:
+            if not _run_action(bstep, ctx):
+                return False
+    logger.warning("[runner] loop hit max_iters cap %d; stopping", cap)
+    return True
+
+
+def _op_contracts(session: Any, action_index: Mapping[str, Callable[..., Any]] | None) -> dict[str, ToolMeta]:
+    """``{op: ToolMeta}`` for this body's actions — the contracts the drift check reads."""
+    try:
+        index = action_index or _build_action_index(session.api, env=getattr(session, "env", None))
+    except Exception as exc:
+        logger.debug("[runner] no action index; drift checking disabled: %s", exc)
+        return {}
+    metas = {}
+    for name, fn in index.items():
+        meta = getattr(fn, "__tool_meta__", None)
+        if isinstance(meta, ToolMeta):
+            metas[name] = meta
+    return metas
+
+
+def _drift(step: ActionStep, metas: Mapping[str, ToolMeta], session: Any, env: Mapping[str, Any]) -> str | None:
+    """Why the world contradicts this step's pre-conditions, or ``None``.
+
+    Two independent pre-conditions, the same two the plan-time validator checks:
+    robot self-state, and whether the sensed position the step acts on is still
+    current. Only a *contradiction* counts in either — never a fact we merely do
+    not know.
+    """
+    meta = metas.get(step.op)
+    if meta is None:
+        return None
+    return _self_state_drift(step, meta, session) or _location_drift(step, meta, session, env)
+
+
+def _self_state_drift(step: ActionStep, meta: ToolMeta, session: Any) -> str | None:
+    """Why the measured self-state contradicts this step's ``requires``, or ``None``.
+
+    Never fires on a token the body simply cannot report — see
+    ``contradicted_requirements``. So this catches the world having really moved away
+    from the plan's assumption (the payload was dropped, something was grasped out of
+    band), not our not knowing.
+    """
+    if not meta.requires:
+        return None
+    tokens = current_tokens(session)
+    unmet = contradicted_requirements(tokens, meta.requires)
+    if not unmet:
+        return None
+    return f"{step.op} requires {list(unmet)}, but the robot is measurably {sorted(tokens)}"
+
+
+def _location_drift(step: ActionStep, meta: ToolMeta, session: Any, env: Mapping[str, Any]) -> str | None:
+    """Why the sensing this step acts on is gone, or ``None``.
+
+    The plan-time twin is ``sequence._check_location_need``: an action declaring
+    ``consumes_location`` that names no source reads the api's sensing cache, so it
+    needs *some* current sensing to act on. ``ExecutionMemory`` owns that cache's
+    freshness (``api/memory.py``), and it is a ledger of what was dispatched rather
+    than a reading off a body — an empty one is knowledge, not ignorance, so the step
+    is certain to come back empty-handed. Plan time cannot see this: it validates the
+    order as written, while an invalidating action can reach the robot here that the
+    plan never contained (a re-plan's remainder, a recovery retreat, a body that
+    drives itself into range).
+
+    A step that NAMES its source is deliberately left alone: that value is already
+    resolved in the runner's bindings, and a compound op which binds a result without
+    a location-producing contract (``track_detect``) would make an empty memory look
+    like staleness we cannot prove.
+    """
+    if not meta.consumes_location:
+        return None
+    memory = getattr(getattr(session, "api", None), "memory", None)
+    if not isinstance(memory, ExecutionMemory) or memory.locations:
+        return None
+    for value in step.params.values():
+        if referenced_binding_names(value) or (isinstance(value, str) and value in env):
+            return None
+    return f"{step.op} acts on a sensed position, but every earlier sensing has been invalidated"
+
+
+def _request_replan(replan: Replanner, session: Any, why: str, out: list[dict], state: dict) -> list | None:
+    """Ask for a replacement remainder and record the event; ``None`` = keep the plan.
+
+    Falling back to the original plan when re-planning is unavailable or comes back
+    empty is deliberate: the drift check reads a best-effort belief, not a safety
+    interlock, so it may add a better plan but must never take away an execution
+    that would otherwise have run.
+    """
+    logger.warning("[runner] the plan no longer fits the world: %s — re-planning", why)
+    world = WorldState.snapshot(session)
+    try:
+        fresh = replan(world, why)
+    except Exception as exc:
+        logger.warning("[runner] re-planning failed, continuing with the original plan: %s", exc)
+        return None
+    if not fresh:
+        logger.warning("[runner] re-planner returned no steps, continuing with the original plan")
+        return None
+    i = state["i"]
+    out.append({"i": i, "op": "<replan>", "ok": True, "result": {"reason": why, "steps": len(fresh)}})
+    state["i"] = i + 1
+    return list(fresh)
+
+
 def run_sequence(
     session: Any,
-    steps: list[ActionStep],
+    steps: list[ActionStep | LoopStep],
     *,
     config: SkillExecConfig | None = None,
     executor: Executor | None = None,
     action_index: Mapping[str, Callable[..., Any]] | None = None,
+    replan: Replanner | None = None,
+    max_replans: int = 2,
 ) -> dict:
     """Execute an action sequence in order, with no per-step LLM.
 
@@ -721,11 +1063,18 @@ def run_sequence(
             ops run through the agent's rails. Defaults to a direct executor
             (built from ``action_index`` or ``session.api``) for mock / tests.
         action_index: legacy — used only to build the default direct executor.
+        replan: called when the world contradicts the next step's pre-conditions —
+            its ``requires`` measurably false, or the sensing it acts on invalidated
+            since the plan was written; returns a replacement remainder. Omit it and
+            the drift check is skipped entirely (no cost, today's behaviour).
+        max_replans: cap on re-plans per run. Past it, drift is logged and the
+            step dispatched anyway — a plan we cannot improve still beats none.
 
     Returns:
         ``{ok, steps_done, steps:[{i, op, ok, result|reason}], env_keys}``.
         Stops at the first failing step and reports the structured reason
-        (rails/RecoveryRail already handled any safe retreat for real runs).
+        (rails/RecoveryRail already handled any safe retreat for real runs). A
+        re-plan appears as an ``op: "<replan>"`` record carrying its reason.
     """
     cfg = config or SkillExecConfig()
     base_run_op: Executor = executor or direct_executor(action_index or session.api)
@@ -744,108 +1093,35 @@ def run_sequence(
     cache = _prescan(session, steps)
 
     out: list[dict] = []
-    holding = False
-    tracked_grasp: _TrackedGraspContext | None = None
+    state: dict = {"holding": False, "i": 0, "tracked_grasp": None}  # shared across steps + loop bodies
+    ctx = _RunContext(env=env, run_op=run_op, session=session, cfg=cfg,
+                      cache=cache, out=out, state=state)
+    # Empty without a replanner, which makes _drift a dict lookup that always misses.
+    metas = _op_contracts(session, action_index) if replan is not None else {}
+    pending: list[ActionStep | LoopStep] = list(steps)
+    replans = 0
     ok_all = True
-    for i, step in enumerate(steps):
-        try:
-            if token is not None:
-                token.raise_if_set()
-            params = resolve_params(step.params, env)
-            if step.op == TRACK_DETECT:
-                det = _track_detect(session, params["object_name"], cfg, cache, occluded=holding)
-                if det is None:
-                    raise _track_miss_error(session, params["object_name"])
-                if step.bind:
-                    env[step.bind] = det
-                result: Any = {"detected": det.get("position")}
-            elif step.op == TRACK_GRASP:
-                det = _track_grasp(session, params["object_name"], float(params["approach_mm"]), cfg)
-                if det is None:
-                    raise _track_miss_error(session, params["object_name"])
-                if step.bind:
-                    env[step.bind] = det
-                tracked_grasp = _TrackedGraspContext(
-                    object_name=str(params["object_name"]),
-                    approach_mm=float(params["approach_mm"]),
-                    bind=step.bind,
-                )
-                result = {"detected": det.get("position"), "grasp_z": det.get("grasp_z")}
-            else:
-                res = run_op(step.op, params)
-                if not res.get("ok"):
-                    _raise_executor_failure(res, f"{step.op} failed")
-                result = res.get("result")
-                if step.bind:
-                    # A bind step must yield a usable detection; a detection that
-                    # ran but returned ok=False (e.g. no valid depth at the target)
-                    # would otherwise silently skip the bind and let a later
-                    # "<bind>.field" reference reach a motion tool unresolved
-                    # (a cryptic "str + float" crash). Abort here with the real cause.
-                    if not (isinstance(result, dict) and result.get("ok")):
-                        reason = result.get("reason", "unknown") if isinstance(result, dict) else "no result"
-                        target = params.get("object_name", step.bind)
-                        raise DetectionError(
-                            f"detection for {target!r} produced no usable result (reason={reason}); "
-                            f"later steps read '{step.bind}.<field>' — aborting instead of crashing downstream",
-                            code=str(reason),
-                        )
-                    env[step.bind] = normalize_detection(result)
-                if step.op in _GRIP_CLOSE_OPS:
-                    sleep_cancellable(max(0.0, cfg.settle_grip_s), token)
-                    confirmed = _grasp_confirmation(session.api, result)
-                    # An empty close is a failure however the approach was planned.
-                    # Only the RETRY needs a track_grasp context (it re-runs that op);
-                    # without one the step still has to fail closed rather than let
-                    # the sequence carry on placing an object it is not holding.
-                    if confirmed is False:
-                        if tracked_grasp is not None and cfg.max_grasp_retries > 0:
-                            retry_det, result, retry_count = _retry_unconfirmed_grasp(
-                                session,
-                                tracked_grasp,
-                                cfg,
-                                run_op,
-                            )
-                            if tracked_grasp.bind:
-                                env[tracked_grasp.bind] = retry_det
-                            if isinstance(result, dict):
-                                result = {**result, "grasp_retry_attempts": retry_count}
-                            else:
-                                result = {"result": result, "grasp_retry_attempts": retry_count}
-                            confirmed = _grasp_confirmation(session.api, result)
-                        else:
-                            raise GraspNotConfirmedError("grasp_not_confirmed: gripper closed without object contact")
-                    holding = confirmed is not False
-                    tracked_grasp = None
-                elif step.op in _GRIP_OPEN_OPS:
-                    holding = False
-                    tracked_grasp = None
-                    sleep_cancellable(max(0.0, cfg.settle_grip_s), token)
-            out.append({"i": i, "op": step.op, "ok": True, "result": result})
-            logger.info("[runner] step %d ok: %s(%s)", i, step.op, params)
-        except RunCancelled:
-            # User cancellation: do NOT record a failed step or run _safe_retreat
-            # (which would issue another home/release motion). Let it unwind to the
-            # GUI, which finalizes the run as "已停止".
-            raise
-        except Exception as exc:  # noqa: BLE001 - surface as structured failure
-            logger.warning("[runner] step %d failed: %s(%s): %s", i, step.op, step.params, exc)
-            if isinstance(exc, _StepExecutionError) and exc.recovery_managed:
-                logger.info("[runner] recovery already handled by the ability rail stack")
-            else:
-                _safe_retreat(session)
-            # ``reason`` is the human/LLM-facing text; ``error_code`` is the machine
-            # one the GUI looks up directly instead of re-deriving it from that text.
-            out.append(
-                {
-                    "i": i,
-                    "op": step.op,
-                    "ok": False,
-                    "reason": f"{type(exc).__name__}: {exc}",
-                    "error_code": error_code(exc),
-                }
-            )
-            ok_all = False
+    while pending:
+        step = pending[0]
+        why = _drift(step, metas, session, env) if isinstance(step, ActionStep) else None
+        if why is not None and replans < max_replans:
+            # replan is set whenever metas is
+            fresh = _request_replan(replan, session, why, out, state)  # type: ignore[arg-type]
+            if fresh is not None:
+                replans += 1
+                pending = list(fresh)
+                # The replacement was validated standalone, so it re-establishes every
+                # binding it reads; dropping the old ones keeps stale coordinates out.
+                env.clear()
+                continue
+        elif why is not None:
+            logger.warning("[runner] %s; re-plan budget (%d) spent — dispatching anyway", why, max_replans)
+        pending.pop(0)
+        if isinstance(step, LoopStep):
+            ok_all = _run_loop(step, ctx)
+        else:
+            ok_all = _run_action(step, ctx)
+        if not ok_all:
             break
 
     return {"ok": ok_all, "steps_done": len(out), "steps": out, "env_keys": sorted(env)}

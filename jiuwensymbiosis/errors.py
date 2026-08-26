@@ -9,14 +9,14 @@ step dict → GUI payload) so the presentation layer can look it up in a table
 instead of re-deriving it by grepping error text. Codes carry no user-facing
 wording — the Chinese diagnosis cards live in ``jiuwensymbiosis.gui.diagnostics``.
 
-This module imports nothing (not from ``jiuwensymbiosis``, numpy, or openjiuwen):
+This module imports only ``jiuwensymbiosis.contracts`` (itself dependency-free):
 perception / rails / the fast runner / the GUI all depend on it, so it stays a leaf
 to keep those imports acyclic.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from jiuwensymbiosis.contracts import DETECTION_REASONS, DetectionReason
 
 __all__ = [
     "DETECTION_REASONS",
@@ -31,27 +31,6 @@ __all__ = [
     "GraspNotConfirmedError",
     "DetectorStartError",
     "error_code",
-]
-
-# Detection/grasp result contract: the ``reason`` of a ``{"ok": False, ...}`` vision
-# result, which adapters and the LLM both read. Re-exported by ``perception.vision``.
-# ``no_camera`` is adapter-level (the frame grab returned None before detection ran).
-DETECTION_REASONS = frozenset(
-    {
-        "no_camera",
-        "no_detection",
-        "empty_mask",
-        "no_valid_depth",
-        "detector_unavailable",
-    }
-)
-
-DetectionReason = Literal[
-    "no_camera",
-    "no_detection",
-    "empty_mask",
-    "no_valid_depth",
-    "detector_unavailable",
 ]
 
 SAFETY_REJECTED = "safety_rejected"
