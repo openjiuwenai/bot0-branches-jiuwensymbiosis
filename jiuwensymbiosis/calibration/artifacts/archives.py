@@ -27,7 +27,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -247,7 +247,11 @@ def dump_waypoint_archive(
 
     arrays: dict[str, Any] = {"space": np.array(space)}
     if space == "joint":
-        assert joint_order is not None and joint_unit is not None and joint_periodic is not None
+        # The validation branch above already rejected every None; re-narrow for the
+        # checker without an assert, which -O would strip out of a production run.
+        joint_order = cast(tuple[str, ...], joint_order)
+        joint_unit = cast(str, joint_unit)
+        joint_periodic = cast(tuple[bool, ...], joint_periodic)
         arrays["joint_values"] = _require_finite_array(joint_values, field="joint_values")
         if arrays["joint_values"].ndim != 2:
             raise ValueError(f"joint_values: expected 2-D, got {arrays['joint_values'].shape}")

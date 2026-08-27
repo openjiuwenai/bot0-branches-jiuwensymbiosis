@@ -18,22 +18,18 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-# Same-directory sibling imports (also importable as scripts.calibrate.*).
-if __package__:  # Installed console entry point imports this module as a package.
-    from .handeye_board import BoardSpec  # noqa: E402
-else:  # Direct source-tree execution: python scripts/calibrate/...
-    from handeye_board import BoardSpec  # noqa: E402
-
 from jiuwensymbiosis.calibration import CalibrationRunOptions
 from jiuwensymbiosis.calibration.domain.quality import ObservabilityThresholds, TargetConsistencyThresholds
 from jiuwensymbiosis.calibration.integration.integration import (
     CalibrationAdapterSpec,
+    SolvedCalibration,
     load_adapter_spec,
     validate_adapter_reload,
 )
 from jiuwensymbiosis.calibration.workflows.profile import load_profile
 from jiuwensymbiosis.calibration.workflows.workflows import WorkflowDependencies
 from jiuwensymbiosis.utils.logging import configure_logging as _configure_framework_logging
+from scripts.calibrate.handeye_board import BoardSpec
 
 if TYPE_CHECKING:
     from jiuwensymbiosis.agent.session import RobotSession
@@ -157,11 +153,8 @@ def workflow_dependencies(
         validate_adapter_reload(
             spec,
             temporary_json,
-            tf_base_cam,
-            intrinsics,
-            mount,
+            SolvedCalibration(tf_base_cam, intrinsics, mount, t_flange_target),
             stations,
-            t_flange_target=t_flange_target,
         )
 
     return WorkflowDependencies(
@@ -201,9 +194,9 @@ def configure_logging(debug: bool = False) -> None:
         "calibrate.cli_common",
         "scripts.calibrate._cli_common",
     ):
-        logger = logging.getLogger(name)
-        logger.setLevel(level)
-        logger.propagate = True
+        named = logging.getLogger(name)
+        named.setLevel(level)
+        named.propagate = True
 
 
 def resolve_mount_guard(device, expected: str, other_command: str) -> str:

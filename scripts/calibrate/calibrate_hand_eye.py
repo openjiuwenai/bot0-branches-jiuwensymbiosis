@@ -61,25 +61,6 @@ if TYPE_CHECKING:
 
 import numpy as np
 
-if __package__:  # Installed console entry point imports this module as a package.
-    from .handeye_board import (
-        BoardSpec,
-        _fill_poses,
-        _imread_rgb,
-        calibrate_intrinsics_from_views,
-        detect_board,
-        generate_board_image,
-    )
-else:  # Direct source-tree execution: python scripts/calibrate/...
-    from handeye_board import (
-        BoardSpec,
-        _fill_poses,
-        _imread_rgb,
-        calibrate_intrinsics_from_views,
-        detect_board,
-        generate_board_image,
-    )
-
 from jiuwensymbiosis.calibration.domain.models import EyeInHandResult, Station, VerifyStat, ViewDetection
 from jiuwensymbiosis.calibration.domain.quality import (
     axxb_residuals,
@@ -106,6 +87,14 @@ from jiuwensymbiosis.utils.geometry import (
     rpy_deg_to_rot,
 )
 from jiuwensymbiosis.utils.proxy import clear_proxy_env
+from scripts.calibrate.handeye_board import (
+    BoardSpec,
+    _fill_poses,
+    _imread_rgb,
+    calibrate_intrinsics_from_views,
+    detect_board,
+    generate_board_image,
+)
 
 logger = logging.getLogger("calibrate_hand_eye")
 
@@ -385,14 +374,14 @@ def _perturb_target_tf(
     from scipy.spatial.transform import Rotation
 
     t = np.asarray(base_tf, dtype=np.float64)[:3, 3]
-    R = np.asarray(base_tf, dtype=np.float64)[:3, :3]
-    rx, ry, rz = Rotation.from_matrix(R).as_euler(axes, degrees=True)
-    R_new = rpy_deg_to_rot(rx + drx, ry + dry, rz + drz, axes=axes)
-    return make_transform(R_new, np.array([t[0], t[1], t[2] + dz], dtype=np.float64))
+    rot = np.asarray(base_tf, dtype=np.float64)[:3, :3]
+    rx, ry, rz = Rotation.from_matrix(rot).as_euler(axes, degrees=True)
+    rot_new = rpy_deg_to_rot(rx + drx, ry + dry, rz + drz, axes=axes)
+    return make_transform(rot_new, np.array([t[0], t[1], t[2] + dz], dtype=np.float64))
 
 
 def _collect_auto(device, board: BoardSpec, intrinsics, dist, args) -> tuple[list[Station], tuple[int, int] | None]:
-    # TODO: 接共享 motion safety policy（见架构检视 §3.2）。--auto 扰动目标是
+    # 未接共享 motion safety policy：--auto 扰动目标是
     # 运行时生成的，不自动落入人工确认 waypoint 的 SafetyRail 例外；当前由
     # --confirm-estop + 操作者现场监督兜底，Driver 硬件限位保留。
     stations: list[Station] = []
@@ -609,7 +598,7 @@ def _print_next_steps(args, res: EyeInHandResult) -> None:
 
 
 def _verify_live(env, device, res: EyeInHandResult, intrinsics: np.ndarray, args) -> None:
-    # TODO: 接共享 motion safety policy（见架构检视 §3.2）。verify-touch 目标
+    # 未接共享 motion safety policy：verify-touch 目标
     # 是运行时由求解结果+深度计算得到的，不自动落入人工确认 waypoint 例外；
     # 当前由 --confirm-estop + 操作者现场监督兜底，Driver 硬件限位保留。
     logger.info("")
@@ -673,14 +662,14 @@ def _verify_live(env, device, res: EyeInHandResult, intrinsics: np.ndarray, args
     # 指尖悬停高度换算为法兰目标 z；先到更高处再下降，避免侧向扫过标定板。
     # 目标 SE(3) 保持当前旋转（只改平移到板中心上方），用 device 的
     # move_to_flange_transform_mm 下发；Env 只提供运行时 RGB-D 观测和工具配置。
-    R_cur = tf_base_flange[:3, :3]
+    rot_cur = tf_base_flange[:3, :3]
     flange_hover_z = p_base[2] + tool + hover
     approach_z = flange_hover_z + 40.0
     device.move_to_flange_transform_mm(
-        make_transform(R_cur, np.array([p_base[0], p_base[1], approach_z], dtype=np.float64))
+        make_transform(rot_cur, np.array([p_base[0], p_base[1], approach_z], dtype=np.float64))
     )
     device.move_to_flange_transform_mm(
-        make_transform(R_cur, np.array([p_base[0], p_base[1], flange_hover_z], dtype=np.float64))
+        make_transform(rot_cur, np.array([p_base[0], p_base[1], flange_hover_z], dtype=np.float64))
     )
     logger.info(
         "指尖应悬停在板中心正上方约 %.0fmm（未接触）。请肉眼确认指尖是否对准板中心：xy 对齐即标定良好。",

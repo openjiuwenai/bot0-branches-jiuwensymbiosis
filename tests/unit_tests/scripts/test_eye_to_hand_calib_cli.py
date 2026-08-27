@@ -432,17 +432,28 @@ class TestAdapterLoaderHook:
         np.testing.assert_allclose(calib["T_base_cam"]["matrix_4x4"], x)
 
     def test_reload_smoke_passes_on_good_data(self, tmp_path):
-        from jiuwensymbiosis.calibration.integration.integration import load_adapter_spec, validate_adapter_reload
+        from jiuwensymbiosis.calibration.integration.integration import (
+            SolvedCalibration,
+            load_adapter_spec,
+            validate_adapter_reload,
+        )
 
         calibration_adapter = load_adapter_spec("jiuwensymbiosis.adapters.so101")
 
         stations, x = self._good_stations()
         validate_adapter_reload(
-            calibration_adapter, tmp_path / "reload.json", x, np.eye(3) * 800, "eye_to_hand", stations
+            calibration_adapter,
+            tmp_path / "reload.json",
+            SolvedCalibration(x, np.eye(3) * 800, "eye_to_hand"),
+            stations,
         )
 
     def test_reload_smoke_fails_on_wrong_matrix(self, tmp_path):
-        from jiuwensymbiosis.calibration.integration.integration import load_adapter_spec, validate_adapter_reload
+        from jiuwensymbiosis.calibration.integration.integration import (
+            SolvedCalibration,
+            load_adapter_spec,
+            validate_adapter_reload,
+        )
 
         calibration_adapter = load_adapter_spec("jiuwensymbiosis.adapters.so101")
 
@@ -452,9 +463,7 @@ class TestAdapterLoaderHook:
             validate_adapter_reload(
                 calibration_adapter,
                 tmp_path / "reload.json",
-                bad_x,
-                np.eye(3) * 800,
-                "eye_to_hand",
+                SolvedCalibration(bad_x, np.eye(3) * 800, "eye_to_hand"),
                 stations,
             )
 
@@ -466,7 +475,11 @@ class TestAdapterLoaderHook:
 
         import numpy as np
 
-        from jiuwensymbiosis.calibration.integration.integration import load_adapter_spec, validate_adapter_reload
+        from jiuwensymbiosis.calibration.integration.integration import (
+            SolvedCalibration,
+            load_adapter_spec,
+            validate_adapter_reload,
+        )
 
         so101_spec = load_adapter_spec("jiuwensymbiosis.adapters.so101")
 
@@ -476,9 +489,7 @@ class TestAdapterLoaderHook:
             validate_adapter_reload(
                 spec,
                 tmp_path / "c.json",
-                x,
-                np.eye(3) * 800,
-                "eye_to_hand",
+                SolvedCalibration(x, np.eye(3) * 800, "eye_to_hand"),
                 stations,
             )
 

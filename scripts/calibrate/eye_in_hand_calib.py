@@ -11,7 +11,10 @@ meaning cannot change underneath existing scripts.
 
 from __future__ import annotations
 
+import logging
 import sys
+
+logger = logging.getLogger("eye_in_hand_calib")
 
 _LEGACY_NOTICE = (
     "[calib] compatibility mode: this invocation uses the legacy Piper eye-in-hand wizard. "
@@ -37,18 +40,14 @@ def _use_unified(argv: list[str]) -> bool:
 
 
 def _run_unified(argv: list[str]) -> int:
-    if __package__:
-        from .hand_eye_calib import main as unified_main
-    else:
-        from hand_eye_calib import main as unified_main
+    from scripts.calibrate.hand_eye_calib import main as unified_main
+
     return unified_main(argv, prog="eye_in_hand_calib.py", require_mount="eye_in_hand")
 
 
 def _run_legacy(argv: list[str]) -> int:
-    if __package__:
-        from .calibrate_hand_eye import main as legacy_main
-    else:
-        from calibrate_hand_eye import main as legacy_main
+    from scripts.calibrate.calibrate_hand_eye import main as legacy_main
+
     return legacy_main(argv)
 
 
@@ -57,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if _use_unified(args):
         return _run_unified(args)
-    print(_LEGACY_NOTICE, file=sys.stderr)
+    logger.warning(_LEGACY_NOTICE)
     return _run_legacy(args)
 
 

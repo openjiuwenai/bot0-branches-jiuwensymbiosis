@@ -27,7 +27,8 @@ class ArtifactReloadValidator(Protocol):
         stations: list,
         *,
         t_flange_target: np.ndarray | None = None,
-    ) -> None: ...
+    ) -> None:
+        pass
 
 
 @dataclass(frozen=True)

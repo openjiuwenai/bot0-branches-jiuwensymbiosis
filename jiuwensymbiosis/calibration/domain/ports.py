@@ -49,9 +49,11 @@ class CalibrationCaptureSource(Protocol):
     """Port that supplies calibration frames and declares camera topology."""
 
     @property
-    def camera_mount(self) -> Literal["eye_in_hand", "eye_to_hand"]: ...
+    def camera_mount(self) -> Literal["eye_in_hand", "eye_to_hand"]:
+        pass
 
-    def capture_calibration_frame(self) -> CalibrationCameraFrame: ...
+    def capture_calibration_frame(self) -> CalibrationCameraFrame:
+        pass
 
 
 @dataclass(frozen=True)
@@ -103,7 +105,8 @@ class JointState:
 class CalibrationPoseSource(Protocol):
     """Port that reads flange-in-base SE(3), with translation in millimetres."""
 
-    def get_flange_transform_mm(self) -> np.ndarray: ...
+    def get_flange_transform_mm(self) -> np.ndarray:
+        pass
 
 
 @runtime_checkable
@@ -117,16 +120,19 @@ class JointCalibrationMotion(CalibrationPoseSource, Protocol):
     workflow, not via this Protocol, so existing adapters need no change.
     """
 
-    def get_joint_state(self) -> JointState: ...
+    def get_joint_state(self) -> JointState:
+        pass
 
-    def move_joint_vector(self, q: np.ndarray) -> None: ...
+    def move_joint_vector(self, q: np.ndarray) -> None:
+        pass
 
 
 @runtime_checkable
 class CartesianCalibrationMotion(CalibrationPoseSource, Protocol):
     """Cartesian controlled calibration motion in base-frame millimetre SE(3)."""
 
-    def move_to_flange_transform_mm(self, tf: np.ndarray) -> None: ...
+    def move_to_flange_transform_mm(self, tf: np.ndarray) -> None:
+        pass
 
 
 @runtime_checkable
@@ -135,7 +141,7 @@ class ManualGuidance(Protocol):
 
     def manual_guidance(self):
         """Release the arm for teaching and restore a controllable state on exit."""
-        ...
+        pass
 
 
 @runtime_checkable
@@ -151,11 +157,11 @@ class GuidanceHold(Protocol):
 
     def hold_arm(self) -> None:
         """Re-engage torque at the current pose so the operator can let go."""
-        ...
+        pass
 
     def release_arm(self) -> None:
         """Drop torque again to resume hand-guiding."""
-        ...
+        pass
 
 
 __all__ = [

@@ -20,7 +20,11 @@ class TestReloadCallsSpecLoader:
 
     def test_uses_spec_loader_not_getattr(self, tmp_path):
         from jiuwensymbiosis.calibration.domain.models import Station, ViewDetection
-        from jiuwensymbiosis.calibration.integration.integration import load_adapter_spec, validate_adapter_reload
+        from jiuwensymbiosis.calibration.integration.integration import (
+            SolvedCalibration,
+            load_adapter_spec,
+            validate_adapter_reload,
+        )
 
         so101_spec = load_adapter_spec("jiuwensymbiosis.adapters.so101")
 
@@ -45,11 +49,20 @@ class TestReloadCallsSpecLoader:
                     detection=ViewDetection(ok=True, tf_cam_target=tf_cam_target, reproj_rms_px=0.1),
                 )
             )
-        validate_adapter_reload(spec, tmp_path / "reload.json", x, np.eye(3) * 800, "eye_to_hand", stations)
+        validate_adapter_reload(
+            spec,
+            tmp_path / "reload.json",
+            SolvedCalibration(x, np.eye(3) * 800, "eye_to_hand"),
+            stations,
+        )
         assert loader_calls
 
     def test_eye_in_hand_uses_flange_frame_artifact_field(self, tmp_path):
-        from jiuwensymbiosis.calibration.integration.integration import load_adapter_spec, validate_adapter_reload
+        from jiuwensymbiosis.calibration.integration.integration import (
+            SolvedCalibration,
+            load_adapter_spec,
+            validate_adapter_reload,
+        )
 
         calibration_adapter = load_adapter_spec("jiuwensymbiosis.adapters.piper")
 
@@ -58,9 +71,7 @@ class TestReloadCallsSpecLoader:
         validate_adapter_reload(
             calibration_adapter,
             tmp_path / "reload.json",
-            x,
-            np.eye(3) * 800,
-            "eye_in_hand",
+            SolvedCalibration(x, np.eye(3) * 800, "eye_in_hand"),
             [],
         )
 
@@ -68,7 +79,11 @@ class TestReloadCallsSpecLoader:
         import json
         from dataclasses import replace
 
-        from jiuwensymbiosis.calibration.integration.integration import load_adapter_spec, validate_adapter_reload
+        from jiuwensymbiosis.calibration.integration.integration import (
+            SolvedCalibration,
+            load_adapter_spec,
+            validate_adapter_reload,
+        )
 
         adapter = load_adapter_spec("jiuwensymbiosis.adapters.piper")
         seen: list[dict] = []
@@ -81,12 +96,21 @@ class TestReloadCallsSpecLoader:
         spec = replace(adapter, load_calibration_artifact=_loader)
         pose = np.eye(4)
         pose[:3, 3] = [15.0, -20.0, 100.0]
-        validate_adapter_reload(spec, tmp_path / "reload.json", pose, np.eye(3) * 800, "eye_in_hand", [])
+        validate_adapter_reload(
+            spec,
+            tmp_path / "reload.json",
+            SolvedCalibration(pose, np.eye(3) * 800, "eye_in_hand"),
+            [],
+        )
 
         assert seen and "object" not in seen[0]
 
     def test_invalid_mount_fails_before_writing_reload_artifact(self, tmp_path):
-        from jiuwensymbiosis.calibration.integration.integration import load_adapter_spec, validate_adapter_reload
+        from jiuwensymbiosis.calibration.integration.integration import (
+            SolvedCalibration,
+            load_adapter_spec,
+            validate_adapter_reload,
+        )
         from jiuwensymbiosis.calibration.workflows.preflight import PreflightError
 
         calibration_adapter = load_adapter_spec("jiuwensymbiosis.adapters.piper")
@@ -96,9 +120,7 @@ class TestReloadCallsSpecLoader:
             validate_adapter_reload(
                 calibration_adapter,
                 path,
-                np.eye(4),
-                np.eye(3),
-                "ceiling",  # type: ignore[arg-type]
+                SolvedCalibration(np.eye(4), np.eye(3), "ceiling"),
                 [],
             )
         assert not path.exists()

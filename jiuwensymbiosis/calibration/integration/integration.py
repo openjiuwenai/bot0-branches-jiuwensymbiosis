@@ -48,7 +48,8 @@ def adapter_package(cfg_or_module: Any) -> str:
             f"adapter module {module!r} is not under {_ADAPTER_PACKAGE_PREFIX!r}; "
             "cannot derive a canonical adapter package."
         )
-    name = module[len(_ADAPTER_PACKAGE_PREFIX) :].split(".", 1)[0]
+    prefix_len = len(_ADAPTER_PACKAGE_PREFIX)
+    name = module[prefix_len:].split(".", 1)[0]
     if not name:
         raise ValueError(f"adapter module {module!r} has no package name segment.")
     return f"{_ADAPTER_PACKAGE_PREFIX}{name}"
@@ -58,11 +59,14 @@ def adapter_package(cfg_or_module: Any) -> str:
 class SessionFactory(Protocol):
     """Callable returned by ``make_builder`` with its attached loaders."""
 
-    def __call__(self, cfg: Any, *, include_sidecars: bool = True) -> Any: ...
+    def __call__(self, cfg: Any, *, include_sidecars: bool = True) -> Any:
+        pass
 
-    def from_yaml(self, path: str | Path, *, include_sidecars: bool = True) -> Any: ...
+    def from_yaml(self, path: str | Path, *, include_sidecars: bool = True) -> Any:
+        pass
 
-    def from_dict(self, data: dict[str, Any], *, include_sidecars: bool = True) -> Any: ...
+    def from_dict(self, data: dict[str, Any], *, include_sidecars: bool = True) -> Any:
+        pass
 
 
 @runtime_checkable
@@ -74,14 +78,16 @@ class CalibrationArtifactLoader(Protocol):
         path: str | Path,
         *,
         mount: Literal["eye_in_hand", "eye_to_hand"],
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        pass
 
 
 @runtime_checkable
 class CalibrationDeviceFactory(Protocol):
     """Build a calibration-owned adapter wrapper over a session Env."""
 
-    def __call__(self, env: Any) -> Any: ...
+    def __call__(self, env: Any) -> Any:
+        pass
 
 
 @dataclass(frozen=True)
@@ -112,7 +118,8 @@ def load_adapter_spec(adapter_module: str | ModuleType) -> CalibrationAdapterSpe
     usable without loading hardware adapter code.
     """
     package = adapter_package(adapter_module)
-    adapter_name = package[len(_ADAPTER_PACKAGE_PREFIX) :]
+    prefix_len = len(_ADAPTER_PACKAGE_PREFIX)
+    adapter_name = package[prefix_len:]
     spec_module_name = f"{_CALIBRATION_ADAPTER_PREFIX}{adapter_name}"
     try:
         module = import_module(spec_module_name)
@@ -138,25 +145,38 @@ def load_adapter_spec(adapter_module: str | ModuleType) -> CalibrationAdapterSpe
     return spec
 
 
+@dataclass(frozen=True)
+class SolvedCalibration:
+    """One solve's publishable output: the camera pose, its frame, and intrinsics.
+
+    ``tf_camera`` is the solved camera pose in the frame ``mount`` selects — the
+    two mounts publish it under different schema fields (``T_base_cam`` for
+    eye-to-hand, ``T_flange_cam`` for eye-in-hand). The four values are produced
+    together by the solver and consumed together by every saver and loader, so
+    they travel as one value rather than as a parameter list to keep in order.
+    """
+
+    tf_camera: np.ndarray
+    intrinsics: np.ndarray
+    mount: Literal["eye_in_hand", "eye_to_hand"]
+    t_flange_target: np.ndarray | None = None
+
+
 def validate_adapter_reload(
     spec: CalibrationAdapterSpec,
     temporary_json: str | Path,
-    tf_base_cam: np.ndarray,
-    intrinsics: np.ndarray,
-    mount: Literal["eye_in_hand", "eye_to_hand"],
+    solved: SolvedCalibration,
     stations: list,
-    *,
-    t_flange_target: np.ndarray | None = None,
 ) -> None:
     """Round-trip a formal artifact through the adapter's runtime loader.
 
-    ``tf_base_cam`` retains its historical parameter name, but represents the
-    solved camera pose in the frame selected by ``mount``.  The two mount
-    modes use different schema fields: ``T_base_cam`` for eye-to-hand and
-    ``T_flange_cam`` for eye-in-hand.  Keeping the saver and loader field in
-    lockstep is the point of this calibration-owned reload gate.
+    Keeping the saver and loader frame field in lockstep is the point of this
+    calibration-owned reload gate.
     """
-    validated_mount = validate_mount(mount, source="mount")
+    tf_base_cam = solved.tf_camera
+    intrinsics = solved.intrinsics
+    t_flange_target = solved.t_flange_target
+    validated_mount = validate_mount(solved.mount, source="mount")
     tmp_path = Path(temporary_json)
     if validated_mount == "eye_to_hand":
         save_eye_to_hand_calibration(
@@ -204,5 +224,6 @@ __all__ = [
     "SessionFactory",
     "adapter_package",
     "load_adapter_spec",
+    "SolvedCalibration",
     "validate_adapter_reload",
 ]

@@ -73,6 +73,8 @@ class TeachingAborted(Exception):
     并让 ``collect_waypoints`` 半途退出 —— 中止就是"不要这一轮的数据",不能像正常结束那样
     写出 waypoint 归档。
     """
+
+
 # 标定子系统的 logger 树根;挂一个 handler 就能收全 collect/execute/publication/preflight。
 _CALIBRATION_LOGGER = "calibration"
 
@@ -104,6 +106,7 @@ class CalibrationEngine:
         self._waypoint_count = 0
         self._station_count = 0
         self._profile_path: Path | None = None
+        self._profile_dir: tempfile.TemporaryDirectory | None = None
 
     # ------------------------------------------------------------------ 控制
     def start_teaching(self) -> None:
@@ -383,17 +386,20 @@ class CalibrationEngine:
                 "output": str(self._setup.out_path),
             }
         }
-        fd, name = tempfile.mkstemp(suffix=".calib.yaml")
-        with open(fd, "w", encoding="utf-8") as handle:
-            yaml.safe_dump(payload, handle, allow_unicode=True, sort_keys=False)
-        self._profile_path = Path(name)
+        # 引擎持有目录而非裸文件描述符:目录对象自带 finalizer,引擎被丢弃或进程退出时
+        # 同样会清掉,不必指望 close 一定被调到。
+        self._profile_dir = tempfile.TemporaryDirectory(prefix="jiuwen-calib-")
+        path = Path(self._profile_dir.name) / "profile.calib.yaml"
+        path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        self._profile_path = path
         return self._profile_path
 
     def close(self) -> None:
         """删除本次运行生成的临时标定 profile(界面离开标定工具时调用)。"""
-        if self._profile_path is not None:
-            self._profile_path.unlink(missing_ok=True)
-            self._profile_path = None
+        if self._profile_dir is not None:
+            self._profile_dir.cleanup()
+            self._profile_dir = None
+        self._profile_path = None
 
     def _options(self, *, dry_run: bool):
         from jiuwensymbiosis.calibration import CalibrationRunOptions

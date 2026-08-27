@@ -466,17 +466,17 @@ class So101Api(BaseRobotApi):
         return overlay
 
     def _stash_detection_overlay(
-        self, rgb: Any, best: dict, u: float, v: float, result: dict, top_surface: dict | None
+        self, rgb: Any, best: dict, centroid_uv: tuple[float, float], result: dict, top_surface: dict | None
     ) -> None:
         """Build + stash the annotated detection image (best-effort; never raises)."""
         try:
-            grasp_uv: tuple[float, float] = (float(u), float(v))
+            grasp_uv = centroid_uv
             if top_surface is not None:
                 reproj = self._project_base_to_pixel(result["position"])
                 if reproj is not None:
                     grasp_uv = reproj
             self._last_detection_overlay = annotate_detection_overlay(
-                rgb, best, centroid_uv=(float(u), float(v)), grasp_uv=grasp_uv
+                rgb, best, centroid_uv=centroid_uv, grasp_uv=grasp_uv
             )
         except Exception as exc:  # overlay is a diagnostic; never break a grasp
             logger.debug("[detection-overlay] build failed: %s", exc)
@@ -643,7 +643,7 @@ class So101Api(BaseRobotApi):
             result["grasp_rz"] = top_surface["rz"]
             result["grasp_width_mm"] = top_surface["width_mm"]
         if build_overlay:
-            self._stash_detection_overlay(rgb, best, u, v, result, top_surface)
+            self._stash_detection_overlay(rgb, best, (float(u), float(v)), result, top_surface)
         tracking = None
         if include_tracking:
             tracking = self._tracking_metadata(
@@ -702,8 +702,10 @@ class So101Api(BaseRobotApi):
         scores = sorted((float(r.get("score", 0.0)) for r in results), reverse=True)
         # Shared meaning is "every instance"; this body has no per-instance depth, so an
         # entry carries score + pixel only — enough for a planner to size a multi-target loop.
-        objects = [{"object": target, "score": float(r.get("score", 0.0)),
-                    "pixel_uv": r.get("center") or r.get("pixel_uv")} for r in results]
+        objects = [
+            {"object": target, "score": float(r.get("score", 0.0)), "pixel_uv": r.get("center") or r.get("pixel_uv")}
+            for r in results
+        ]
         return {
             "ok": True,
             "object": target,

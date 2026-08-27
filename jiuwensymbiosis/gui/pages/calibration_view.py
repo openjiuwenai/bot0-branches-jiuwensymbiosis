@@ -275,6 +275,8 @@ class CalibrationView:
         self._board = BoardParams()
         self._waypoints = 0
         self._teaching_done = False
+        # 收尾需二次触发:第一次只警告,避免误触提前结束示教。
+        self._finish_warned = False
         self._stations_ok = 0
         self._result: dict[str, Any] | None = None
         self._pdf_path: Path | None = None
@@ -311,9 +313,7 @@ class CalibrationView:
                 ui.space()
                 self._body_label = ui.label("").classes("text-sm text-gray-500")
 
-            self._blocker = (
-                ui.label().classes("w-full").style(_banner_style("warn"))
-            )
+            self._blocker = ui.label().classes("w-full").style(_banner_style("warn"))
             self._blocker.set_visibility(False)
 
             # 步骤条可点回退:走到后面几步才发现板参数填错或姿态不够时,不该只能从头再来。
@@ -522,7 +522,9 @@ class CalibrationView:
                 self._in_stations = ui.number(
                     "拍照次数", value=20, min=3, max=60, format="%d", on_change=lambda _e: self._refresh_capture_note()
                 ).classes("w-32")
-                self._in_corners = ui.number("每张照片最少角点数", value=16, min=6, max=100, format="%d").classes("w-44")
+                self._in_corners = ui.number("每张照片最少角点数", value=16, min=6, max=100, format="%d").classes(
+                    "w-44"
+                )
             self._capture_note = ui.label("").classes("text-sm text-gray-600")
             self._btn_run = ui.button("开始采集", on_click=self._start_capture).props("color=negative")
         with self._capture_stages["running"]:
@@ -653,6 +655,8 @@ class CalibrationView:
         self.stop(wait=True)
         self._waypoints = 0
         self._teaching_done = False
+        # 收尾需二次触发:第一次只警告,避免误触提前结束示教。
+        self._finish_warned = False
         self._wp_label.set_text("0")
         self._wp_hint.set_text("")
         self._teach_status.set_text("")
@@ -666,6 +670,8 @@ class CalibrationView:
         self.stop(wait=True)
         self._waypoints = 0
         self._teaching_done = False
+        # 收尾需二次触发:第一次只警告,避免误触提前结束示教。
+        self._finish_warned = False
         self._result = None
         self._saved_path = None
         self._wp_label.set_text("0")
@@ -998,7 +1004,7 @@ class CalibrationView:
                 type="warning",
             )
             # 二次触发才真正结束:第一次只是警告,避免误触提前收尾。
-            if not getattr(self, "_finish_warned", False):
+            if not self._finish_warned:
                 self._finish_warned = True
                 return
         if self._engine is not None:
@@ -1296,7 +1302,8 @@ class CalibrationView:
             ui.label(f"{value:.2f} {unit}（限 {limit:g}）").classes("text-sm font-mono w-52")
             ui.label(text).classes("text-sm").style(f"color:{color};")
 
-    def _render_reasons(self, payload: dict, report_path: Any = None) -> None:
+    @staticmethod
+    def _render_reasons(payload: dict, report_path: Any = None) -> None:
         """列出改进建议;求解器的英文原文收进折叠区。
 
         ``reasons`` 是标定子系统的英文诊断串(如 ``min_axis_separation_deg 8.3 < 15.0``),
@@ -1308,7 +1315,8 @@ class CalibrationView:
             return
         # 去重:一条建议常对应多个检查项(如 target_consistency 的 _trans 与 _rot),
         # 不去重就会把同一句话原样列两遍。
-        remedies = list(dict.fromkeys(remedy for check in failed if (remedy := _remedy_for(check))))
+        found = (_remedy_for(check) for check in failed)
+        remedies = list(dict.fromkeys(remedy for remedy in found if remedy))
         if remedies:
             ui.label("怎么改进").classes("font-bold mt-2")
             for remedy in remedies:

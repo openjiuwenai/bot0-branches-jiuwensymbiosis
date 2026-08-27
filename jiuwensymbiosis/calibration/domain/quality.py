@@ -733,7 +733,8 @@ class EyeToHandAcceptancePolicy:
         if obs.max_relative_translation_camera_mm < th.min_camera_translation_baseline_mm:
             failed.append("observability_camera_trans")
             reasons.append(
-                f"camera: max translation {obs.max_relative_translation_camera_mm:.1f}mm < {th.min_camera_translation_baseline_mm}mm"
+                f"camera: max translation {obs.max_relative_translation_camera_mm:.1f}mm "
+                f"< {th.min_camera_translation_baseline_mm}mm"
             )
         if obs.n_duplicates > 0:
             failed.append("observability_duplicates")
@@ -743,12 +744,14 @@ class EyeToHandAcceptancePolicy:
         if tc.translation_residual_mm.std > tc_th.max_translation_std_mm:
             failed.append("target_consistency_trans")
             reasons.append(
-                f"T_flange_target translation std {tc.translation_residual_mm.std:.2f}mm > {tc_th.max_translation_std_mm}mm"
+                f"T_flange_target translation std {tc.translation_residual_mm.std:.2f}mm "
+                f"> {tc_th.max_translation_std_mm}mm"
             )
         if tc.rotation_residual_deg.max > tc_th.max_rotation_spread_deg:
             failed.append("target_consistency_rot")
             reasons.append(
-                f"T_flange_target rotation spread {tc.rotation_residual_deg.max:.2f}deg > {tc_th.max_rotation_spread_deg}deg"
+                f"T_flange_target rotation spread {tc.rotation_residual_deg.max:.2f}deg "
+                f"> {tc_th.max_rotation_spread_deg}deg"
             )
         return CalibrationDecision(
             accept=not failed,

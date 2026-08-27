@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from jiuwensymbiosis.agent.session import RobotSession
 
@@ -104,8 +104,22 @@ def make_detector_sidecar(cfg_attr: str = "detector"):
     return _build
 
 
+class ConfigFactory(Protocol):
+    """The config-class contract a session builder needs: both loaders.
+
+    Typing ``cfg_cls`` as a bare ``type`` hid these from the checker, so every
+    call to them had to be silenced one by one.
+    """
+
+    def from_yaml(self, path: str | Path) -> Any:
+        pass
+
+    def from_dict(self, data: dict[str, Any]) -> Any:
+        pass
+
+
 def make_builder(
-    cfg_cls: type,
+    cfg_cls: ConfigFactory,
     env_cls: type,
     api_cls: type,
     *,
@@ -174,15 +188,15 @@ def make_builder(
 
     def from_yaml(path: str | Path, *, include_sidecars: bool = True) -> RobotSession:
         """Build a session from a YAML config file at ``path``."""
-        # cfg_cls is a config dataclass w/ from_yaml classmethod (factory contract)
-        return _session_from_cfg(cfg_cls.from_yaml(path), include_sidecars=include_sidecars)  # type: ignore[attr-defined]
+        return _session_from_cfg(cfg_cls.from_yaml(path), include_sidecars=include_sidecars)
 
     def from_dict(data: dict[str, Any], *, include_sidecars: bool = True) -> RobotSession:
         """Build a session from an in-memory config ``dict``."""
-        # cfg_cls is a config dataclass w/ from_dict classmethod (factory contract)
-        return _session_from_cfg(cfg_cls.from_dict(data), include_sidecars=include_sidecars)  # type: ignore[attr-defined]
+        return _session_from_cfg(cfg_cls.from_dict(data), include_sidecars=include_sidecars)
 
-    # function-attribute attachment pattern; mypy can't model fn.__dict__
+    # A function carrying its loaders, deliberately not a class — see
+    # tests/unit_tests/adapters/common/test_builder.py:TestBuilderSignature.
+    # mypy cannot model fn.__dict__, so the two attachments stay silenced.
     build.from_yaml = from_yaml  # type: ignore[attr-defined]
     build.from_dict = from_dict  # type: ignore[attr-defined]
     return build

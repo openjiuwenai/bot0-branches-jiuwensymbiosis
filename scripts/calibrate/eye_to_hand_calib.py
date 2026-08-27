@@ -15,12 +15,7 @@ solve, quality gating, or artifact writing.
 
 from __future__ import annotations
 
-import sys
-
-if __package__:  # Installed console entry point imports this module as a package.
-    from .hand_eye_calib import main as _unified_main
-else:  # Direct source-tree execution: python scripts/calibrate/...
-    from hand_eye_calib import main as _unified_main
+from scripts.calibrate.hand_eye_calib import main as _unified_main
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,4 +25,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

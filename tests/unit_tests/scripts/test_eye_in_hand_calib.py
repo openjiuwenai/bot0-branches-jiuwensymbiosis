@@ -78,10 +78,11 @@ def test_legacy_runner_forwards_to_existing_cli(monkeypatch):
     assert calls == [["--selftest"]]
 
 
-def test_legacy_dispatch_is_explicit_to_operator(monkeypatch, capsys):
+def test_legacy_dispatch_is_explicit_to_operator(monkeypatch, caplog):
     monkeypatch.setattr(facade, "_run_legacy", lambda _args: 0)
 
-    assert facade.main(["--selftest"]) == 0
+    with caplog.at_level("WARNING", logger="eye_in_hand_calib"):
+        assert facade.main(["--selftest"]) == 0
 
-    assert "compatibility mode" in capsys.readouterr().err
+    assert "compatibility mode" in caplog.text
     assert "--replay" in facade._LEGACY_NOTICE

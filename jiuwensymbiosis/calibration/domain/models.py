@@ -317,7 +317,8 @@ class AcceptancePolicy(Protocol):
     can differ while the data model stays unified.
     """
 
-    def decide(self, quality: CalibrationQualityReport) -> CalibrationDecision: ...
+    def decide(self, quality: CalibrationQualityReport) -> CalibrationDecision:
+        pass
 
 
 __all__ = [

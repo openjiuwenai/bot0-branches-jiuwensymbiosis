@@ -27,7 +27,11 @@ from jiuwensymbiosis.calibration.domain.ports import (
     JointState,
     ManualGuidance,
 )
-from jiuwensymbiosis.calibration.integration.integration import CalibrationAdapterSpec, validate_adapter_reload
+from jiuwensymbiosis.calibration.integration.integration import (
+    CalibrationAdapterSpec,
+    SolvedCalibration,
+    validate_adapter_reload,
+)
 
 
 @dataclass(frozen=True)
@@ -110,9 +114,7 @@ def assert_calibration_conformance(case: AdapterConformanceCase, tmp_path: Path)
     validate_adapter_reload(
         spec,
         reload_path,
-        transform_for_reload,
-        np.eye(3) * 800.0,
-        case.expected_mount,
+        SolvedCalibration(transform_for_reload, np.eye(3) * 800.0, case.expected_mount),
         [],
     )
 

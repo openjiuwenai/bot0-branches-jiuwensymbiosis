@@ -37,33 +37,21 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
-from pathlib import Path
 
-# Same-directory sibling imports (also importable as scripts.calibrate.*).
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-if __package__:  # Installed console entry point imports this module as a package.
-    from ._cli_common import (  # noqa: E402 - sibling path setup must run first
-        configure_logging,
-        load_adapter_spec_and_session,
-        workflow_dependencies,
-    )
-else:  # Direct source-tree execution: python scripts/calibrate/...
-    from _cli_common import (  # noqa: E402 - sibling path setup must run first
-        configure_logging,
-        load_adapter_spec_and_session,
-        workflow_dependencies,
-    )
-
-from jiuwensymbiosis.calibration import (  # noqa: E402 - direct-script path setup must run first
+from jiuwensymbiosis.calibration import (
     CalibrationRunOptions,
     collect_waypoints,
     execute_calibration,
     replay_calibration,
 )
-from jiuwensymbiosis.calibration.workflows.collect import import_waypoints  # noqa: E402 - see path setup above
-from jiuwensymbiosis.calibration.workflows.preflight import PreflightError  # noqa: E402 - see path setup above
-from jiuwensymbiosis.utils.proxy import clear_proxy_env  # noqa: E402 - see path setup above
+from jiuwensymbiosis.calibration.workflows.collect import import_waypoints
+from jiuwensymbiosis.calibration.workflows.preflight import PreflightError
+from jiuwensymbiosis.utils.proxy import clear_proxy_env
+from scripts.calibrate._cli_common import (
+    configure_logging,
+    load_adapter_spec_and_session,
+    workflow_dependencies,
+)
 
 logger = logging.getLogger("hand_eye_calib")
 
@@ -266,13 +254,10 @@ def _guard(device, require_mount: str | None) -> None:
     """Enforce an alias entry point's mount expectation (no-op for the unified entry)."""
     if require_mount is None:
         return
-    if __package__:
-        from ._cli_common import resolve_mount_guard
-    else:
-        from _cli_common import resolve_mount_guard
+    from scripts.calibrate._cli_common import resolve_mount_guard
 
     resolve_mount_guard(device, require_mount, other_command="jiuwensymbiosis-calibrate-hand-eye")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

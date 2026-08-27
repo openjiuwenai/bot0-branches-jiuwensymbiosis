@@ -107,6 +107,13 @@ _REPROJ_ADVICE_GOOD_PX = 1.0
 _REPROJ_ADVICE_WARN_PX = 2.0
 
 
+def _is_usable_per_view(values: Any) -> bool:
+    """Whether per-view reprojection RMS is a non-empty finite 1-D vector."""
+    if values is None or values.ndim != 1 or values.size == 0:
+        return False
+    return bool(np.all(np.isfinite(values)))
+
+
 def _log_reprojection_advice(reprojection, *, mount: str) -> None:
     """Report reprojection magnitude and, when large, what to check.
 
@@ -119,7 +126,7 @@ def _log_reprojection_advice(reprojection, *, mount: str) -> None:
         values = np.asarray(per_view, dtype=np.float64) if per_view else None
     except (TypeError, ValueError):
         values = None
-    if values is None or values.ndim != 1 or values.size == 0 or not np.all(np.isfinite(values)):
+    if not _is_usable_per_view(values):
         logger.warning("reprojection: missing or non-finite; cannot assess detection quality.")
         return
     mean = float(np.mean(values))

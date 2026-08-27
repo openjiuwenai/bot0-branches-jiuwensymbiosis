@@ -247,7 +247,8 @@ def capture_stations(
     prev_boundary = 0
     for capture_count, index in enumerate(capture_indices):
         target = dense[index]
-        segment = list(dense[prev_boundary : index + 1])
+        segment_end = index + 1
+        segment = list(dense[prev_boundary:segment_end])
         pre_move = read_pose()
         settle_info = run_segment(segment, index)
         logger.info(

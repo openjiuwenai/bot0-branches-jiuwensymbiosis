@@ -17,7 +17,7 @@ Frame conventions used by the helpers:
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 from scipy.spatial.transform import Rotation  # scipy is a core dependency (see pyproject)
@@ -111,11 +111,22 @@ def rpy_deg_to_rot(rx_deg: float, ry_deg: float, rz_deg: float, axes: str = _RPY
     return np.asarray(rot, dtype=np.float64)
 
 
+class XyzRpy(NamedTuple):
+    """A pose as millimetres + degrees. Unpacks like the plain tuple it replaces."""
+
+    x_mm: float
+    y_mm: float
+    z_mm: float
+    rx_deg: float
+    ry_deg: float
+    rz_deg: float
+
+
 def matrix_mm_to_xyzrpy(
     matrix: np.ndarray,
     *,
     axes: str = _RPY_AXES,
-) -> tuple[float, float, float, float, float, float]:
+) -> XyzRpy:
     """4x4 SE(3) with millimetre translation -> ``x,y,z,rx,ry,rz``.
 
     This is the body-agnostic half of converting a calibration/workflow matrix
@@ -130,7 +141,7 @@ def matrix_mm_to_xyzrpy(
 
     rx_deg, ry_deg, rz_deg = Rotation.from_matrix(arr[:3, :3]).as_euler(axes, degrees=True)
     x_mm, y_mm, z_mm = arr[:3, 3]
-    return (
+    return XyzRpy(
         float(x_mm),
         float(y_mm),
         float(z_mm),
