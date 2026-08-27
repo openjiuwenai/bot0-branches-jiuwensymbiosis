@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CORE_ROOT = _REPO_ROOT / "jiuwensymbiosis"
 _CALIBRATION_PREFIX = "jiuwensymbiosis.calibration"
@@ -89,6 +91,7 @@ def test_importing_gui_does_not_load_calibration() -> None:
     starts on a machine that installed ``[gui]`` without ``[calib]`` — the calibration
     tool then reports a missing dependency instead of the whole app failing to launch.
     """
+    pytest.importorskip("nicegui", reason="探针要真的 import 页面模块，页面在 [gui] extra 里")
     probe = """
 import sys
 import jiuwensymbiosis.gui
