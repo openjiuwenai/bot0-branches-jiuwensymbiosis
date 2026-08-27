@@ -9,11 +9,24 @@ from types import SimpleNamespace
 
 import pytest
 
-from jiuwensymbiosis.gui import registry
+from jiuwensymbiosis.gui import board_print, registry
 from jiuwensymbiosis.gui.app_state import AppState
 from jiuwensymbiosis.gui.calibration_engine import CalibrationEngine
+from jiuwensymbiosis.gui.pages import calibration_view
 from jiuwensymbiosis.gui.pages.calibration_view import _DOUBLE_TAP_S
 from jiuwensymbiosis.gui.pages.tools_view import _TOOLS, ToolsView
+
+
+@pytest.fixture(autouse=True)
+def board_print_available(monkeypatch):
+    """把标定板依赖探测与绘图桩掉:两者都在 ``[calib]`` extra 里,本文件测的是向导装配。
+
+    缺 OpenCV 时 ``refresh()`` 会挂出依赖提示条并提前返回,硬件行、量取提示与预览都不会
+    被填。预览桩取 ``BoardParams`` 的 repr,所以板参数变了预览就变、只改实测值则不变。
+    绘图本身由 ``test_board_print.py`` 覆盖。
+    """
+    monkeypatch.setattr(calibration_view, "board_print_dependency_hint", lambda: None)
+    monkeypatch.setattr(board_print, "render_preview_data_uri", lambda params, **_kw: f"preview:{params}")
 
 
 @pytest.fixture
