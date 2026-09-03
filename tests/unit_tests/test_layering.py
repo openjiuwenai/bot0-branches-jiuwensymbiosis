@@ -4,9 +4,9 @@
 """The algorithm libraries stay below the api layer.
 
 ``perception/`` and ``motion/`` are body-agnostic algorithms the api layer composes —
-``api/components.py`` imports both. An import back the other way closes that loop, and
-the result shapes the two sides share live in ``jiuwensymbiosis/contracts.py`` (owned by
-neither) precisely so it never has to happen.
+``api/defaults.py`` and the action implementations call into both. An import back the
+other way closes that loop, and the result shapes the two sides share live in
+``jiuwensymbiosis/contracts.py`` (owned by neither) precisely so it never has to happen.
 """
 
 from __future__ import annotations
@@ -39,6 +39,6 @@ def test_no_import_of_the_api_layer(path):
     offenders = sorted(m for m in _imported_modules(path) if m.startswith("jiuwensymbiosis.api"))
     assert not offenders, (
         f"{path.relative_to(_ROOT.parent)} imports {offenders}, but perception/ and motion/ sit BELOW "
-        "the api layer, which imports them back through api/components.py. A shape both sides need "
-        "belongs in jiuwensymbiosis/contracts.py."
+        "the api layer, which composes them through api/defaults.py and the action implementations. "
+        "A shape both sides need belongs in jiuwensymbiosis/contracts.py."
     )

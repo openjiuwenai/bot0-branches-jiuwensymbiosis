@@ -70,7 +70,7 @@ MAX_TRACE_ENTRIES: Final[int] = 1000
 
 ## Protocol-Based Duck Typing
 
-`jiuwensymbiosis/adapters/_common/protocol.py` already uses `typing.Protocol`
+`jiuwensymbiosis/env/protocol.py` already uses `typing.Protocol`
 for the `RobotDriver` contract. Follow the same pattern for new structural
 interfaces:
 
@@ -222,13 +222,13 @@ Follow the existing layout under `jiuwensymbiosis/`:
 jiuwensymbiosis/
   __init__.py              # Public API exports only
   agent/                   # RobotSession, build_robot_agent, RobotAgentConfig
-  api/                     # BaseRobotApi, ActionSpec vocabulary, @implements, defaults, components
-  env/                     # BaseRobotEnv, MockArmEnv, KNOWN_CAPABILITIES
+  api/                     # BaseRobotApi, ActionSpec vocabulary, @implements, defaults
+  env/                     # BaseRobotEnv, MockArmEnv, KNOWN_CAPABILITIES, driver Protocols
   tools/                   # build_robot_tools, RobotControlTool, InProcessCodeTool
   rails/                   # SafetyRail, RecoveryRail, VisualFeedbackRail
   adapters/
-    <name>/                # 6-file pattern: config/lowlevel/env/api/session/yaml
-    _common/               # Shared adapter utilities
+    <name>/                # config/lowlevel/env/api/session/yaml (+ optional calibration)
+    _common/               # Shared adapter building blocks
   utils/                   # Proxy hygiene, logging
 ```
 

@@ -70,19 +70,9 @@ def _dict_literal(pairs: list[tuple[str, str]]) -> str:
     return "{" + ", ".join(f'"{key}": {value}' for key, value in pairs) + "}"
 
 
-def _mixin_names(spec: Spec) -> list[str]:
-    """Base classes the generated Api needs — none, for every body the wizard can build.
-
-    Every ACTION is generated as an explicit ``@implements(SPEC)`` method, so the
-    produced file is its own capability list. The two remaining components in
-    the shared implementations reached through ``api/defaults.py`` are
-    *algorithms* that only run once a body supplies their hooks — a calibrated frame,
-    a detector, a base that can drive. A fresh skeleton has none of that, and the
-    wizard cannot build a mobile body at all, so inheriting either would hand the
-    author actions that fail at the first smoke run. Compare cruzr/api.py to add one.
-    """
-    del spec
-    return []
+# The generated Api subclasses BaseRobotApi alone — the mixin layer
+# (``api/components.py``) is gone; shared implementations live in ``api/defaults.py``
+# as free functions the generated forwarders call explicitly.
 
 
 # Action → (params after ``self``, args passed on, return annotation) for the actions
@@ -866,7 +856,7 @@ def render_env(spec: Spec) -> str:
         """{spec.env_cls} — hardware abstraction wrapping {spec.driver_cls}.
 
         connect() creates self.low_level; Env verbs (home / move_to_flange / ...)
-        delegate to it. See docs/hardware-porting-guide.md Step 3.
+        delegate to it.
         """
 
         from __future__ import annotations
@@ -976,7 +966,7 @@ def render_env(spec: Spec) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _api_imports(spec: Spec, mixins: list[str], tilted: bool, action_specs: list[str]) -> str:
+def _api_imports(spec: Spec, tilted: bool, action_specs: list[str]) -> str:
     lines = ["from __future__ import annotations", ""]
     if tilted:
         lines += ["import math", ""]
@@ -991,12 +981,6 @@ def _api_imports(spec: Spec, mixins: list[str], tilted: bool, action_specs: list
         ")",
         "from jiuwensymbiosis.api.base import BaseRobotApi",
     ]
-    if mixins:
-        lines += [
-            "from jiuwensymbiosis.api.components import (",
-            *(f"    {mixin}," for mixin in mixins),
-            ")",
-        ]
     return "\n".join(lines)
 
 
@@ -1089,7 +1073,6 @@ def _api_vision_block() -> str:
 
 
 def render_api(spec: Spec) -> str:
-    mixins = _mixin_names(spec)
     tilted = _effective_tilted(spec)
     constants = ""
     if tilted:
@@ -1131,7 +1114,6 @@ def render_api(spec: Spec) -> str:
             8,
         )
 
-    bases = _block([f"{mixin}," for mixin in mixins], 4)
     return _render(
         f'''
         """{spec.api_cls} — what the {spec.name} robot does, action by action.
@@ -1141,16 +1123,13 @@ def render_api(spec: Spec) -> str:
         pre-conditions) comes from that spec, so a plan written for another body means
         the same thing here. Generic actions forward to ``api.defaults`` in one line;
         only the tip↔flange geometry and (if any) the vision methods are real work.
-        ``home`` is inherited from BaseRobotApi. See docs/hardware-porting-guide.md Step 4.
+        ``home`` is inherited from BaseRobotApi.
         """
 
         __IMPORTS__
 
 
-        __CONSTANTS__class {spec.api_cls}(
-        __MIXIN_BASES__
-            BaseRobotApi,
-        ):
+        __CONSTANTS__class {spec.api_cls}(BaseRobotApi):
             """Robot API for {spec.name}."""
 
         __INIT_BLOCK__
@@ -1184,9 +1163,8 @@ def render_api(spec: Spec) -> str:
 
         __VISION_BLOCK__
         ''',
-        IMPORTS=_api_imports(spec, mixins, tilted, _api_spec_imports(spec, _hand_written_specs(spec))),
+        IMPORTS=_api_imports(spec, tilted, _api_spec_imports(spec, _hand_written_specs(spec))),
         CONSTANTS=constants,
-        MIXIN_BASES=bases,
         INIT_BLOCK=_api_detection_init() if spec.detection else "",
         GENERIC_BLOCK=_api_generic_block(spec),
         R_DEFAULT=_block([r_default], 12),
@@ -1901,7 +1879,7 @@ def render_env_joint_ik(spec: Spec) -> str:
     )
 
 
-def _api_imports_joint_ik(mixins: list[str], action_specs: list[str]) -> str:
+def _api_imports_joint_ik(action_specs: list[str]) -> str:
     lines = [
         "from __future__ import annotations",
         "",
@@ -1915,14 +1893,12 @@ def _api_imports_joint_ik(mixins: list[str], action_specs: list[str]) -> str:
         ")",
         "from jiuwensymbiosis.api.base import BaseRobotApi",
     ]
-    if mixins:
-        lines += ["from jiuwensymbiosis.api.components import (", *(f"    {mixin}," for mixin in mixins), ")"]
     return "\n".join(lines)
 
 
 def _api_goto_joint_ik(spec: Spec) -> str:
     return _indent(
-        f'''
+        '''
         @implements(GOTO_XYZR)
         def goto_xyzr(self, x: float, y: float, z: float, r: Optional[float] = None,
                       orientation_policy: Literal["top_down"] = "top_down") -> None:
@@ -1931,7 +1907,7 @@ def _api_goto_joint_ik(spec: Spec) -> str:
             TODO: add "preserve" (keep the live tilt) — the pose below hard-codes rx/ry.
             """
             if orientation_policy != "top_down":
-                raise ValueError(f"goto_xyzr: only 'top_down' is implemented, got {{orientation_policy!r}}")
+                raise ValueError(f"goto_xyzr: only 'top_down' is implemented, got {orientation_policy!r}")
             if r is None:
                 r = getattr(self.env.get_flange_pose(), "rz", 0.0)
             pose = SimpleNamespace(x=float(x), y=float(y), z=float(z), rx=180.0, ry=0.0, rz=float(r))
@@ -1962,7 +1938,6 @@ def _api_gripper_joint_ik(spec: Spec) -> str:
 
 
 def render_api_joint_ik(spec: Spec) -> str:
-    mixins = _mixin_names(spec)
     # The gripper pair is written out (its args are accepted and ignored), so it is
     # excluded from the generic block rather than emitted twice.
     exclude = frozenset({"open_gripper", "close_gripper"}) if spec.end_effector == "parallel" else frozenset()
@@ -1985,10 +1960,7 @@ def render_api_joint_ik(spec: Spec) -> str:
         __IMPORTS__
 
 
-        class {spec.api_cls}(
-        __MIXIN_BASES__
-            BaseRobotApi,
-        ):
+        class {spec.api_cls}(BaseRobotApi):
             """Robot API for the {spec.name} joint-level arm."""
 
         __INIT_BLOCK__
@@ -2004,8 +1976,7 @@ def render_api_joint_ik(spec: Spec) -> str:
 
         __VISION_BLOCK__
         ''',
-        IMPORTS=_api_imports_joint_ik(mixins, _api_spec_imports(spec, written, exclude)),
-        MIXIN_BASES=_block([f"{mixin}," for mixin in mixins], 4),
+        IMPORTS=_api_imports_joint_ik(_api_spec_imports(spec, written, exclude)),
         INIT_BLOCK=_api_detection_init() if spec.detection else "",
         GOTO_OVERRIDE=_api_goto_joint_ik(spec),
         GRIPPER_OVERRIDE=_api_gripper_joint_ik(spec),

@@ -14,7 +14,7 @@ forwarding, ``JointState`` construction, camera-mount resolution) is shared in
 per-machine semantics: pose conversion, joint order, and (optional) manual
 guidance.
 
-Requirement checklist (see docs/hardware-porting-guide.md §8.7):
+Requirement checklist (see docs/zh/how-to/port-hardware-adapter.md):
   1. config.py declares ``camera_mount`` (default = this body's historical value).
   2. ``get_flange_transform_mm -> 4x4 SE(3), mm``.
   3. joint metadata via ``build_joint_state(order/unit/periodic/limits)``.

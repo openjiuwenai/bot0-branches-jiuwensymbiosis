@@ -375,7 +375,7 @@ def run_checks(module_str: str) -> list[CheckResult]:
             results.append(("A-07", _SEVERITY_INFO, f"[OK] Api capabilities: {sorted(api_caps)}"))
 
     # ====================================================================
-    # [A-08] Api Mixin capabilities ⊆ Env.capabilities .... ERROR
+    # [A-08] Api capabilities ⊆ Env.capabilities .... ERROR
     # ====================================================================
     if api_cls is not None and env_cls is not None:
         env_caps = set(getattr(env_cls, "capabilities", frozenset()))
@@ -386,15 +386,15 @@ def run_checks(module_str: str) -> list[CheckResult]:
                 (
                     "A-08",
                     _SEVERITY_ERROR,
-                    f"Api Mixin 能力不在 Env.capabilities 中: {sorted(missing_in_env)}。"
+                    f"Api 能力（@implements 动作派生）不在 Env.capabilities 中: {sorted(missing_in_env)}。"
                     f"运行时按 api∩env 门控，这些能力的工具不会暴露给 LLM",
                 )
             )
         else:
-            results.append(("A-08", _SEVERITY_INFO, "[OK] Api Mixin 能力 ⊆ Env.capabilities"))
+            results.append(("A-08", _SEVERITY_INFO, "[OK] Api 能力 ⊆ Env.capabilities"))
 
     # ====================================================================
-    # [A-09] Env 有无 Mixin 的标记能力 .............. INFO
+    # [A-09] Env 有无动作对应的标记能力 .............. INFO
     # ====================================================================
     if env_cls is not None and api_cls is not None:
         env_caps = set(getattr(env_cls, "capabilities", frozenset()))
@@ -405,7 +405,7 @@ def run_checks(module_str: str) -> list[CheckResult]:
                 (
                     "A-09",
                     _SEVERITY_INFO,
-                    f"Env 声明了无 Mixin 的标记能力: {sorted(marker_caps)} (正常现象，不影响运行)",
+                    f"Env 声明了无对应动作的标记能力: {sorted(marker_caps)} (正常现象，不影响运行)",
                 )
             )
         else:
