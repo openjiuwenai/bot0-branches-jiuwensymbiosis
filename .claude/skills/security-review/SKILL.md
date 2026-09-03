@@ -23,7 +23,6 @@ for credential and proxy rules.
 **Rule:** Credentials never enter source code or YAML configs.
 
 - [ ] No model API keys, tokens, or passwords hardcoded in `.py` / `.yaml`
-- [ ] All secrets loaded from environment variables via `os.getenv()`
 - [ ] `.env` files not committed (already in `.gitignore` — do not remove)
 - [ ] Test / demo paths use `MockModel` / `MockDriver` instead of fake keys
 - [ ] No real hardware device paths or endpoints in test fixtures
@@ -32,13 +31,9 @@ for credential and proxy rules.
 # Bad
 OPENAI_API_KEY = "sk-1234567890abcdef"
 
-# Good
-import os
-api_key: str = os.getenv("OPENAI_API_KEY")  # set in environment
-
 # Best for tests — no key needed
-from jiuwensymbiosis.agent import MockModel
-agent = build_robot_agent(..., model=MockModel())
+from jiuwensymbiosis.agent.mock_model import build_mock_model
+agent = build_robot_agent(..., model=build_mock_model())
 ```
 
 ## 2. Physical Safety (robotics-specific — highest priority)

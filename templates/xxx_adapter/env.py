@@ -31,11 +31,22 @@ class XxxEnv(BaseRobotEnv):
         {
             "motion.cartesian",  # Cartesian end-effector commands
             # "motion.joint",       # [选填] Joint-space commands
+            # "motion.servo",       # [选填] Non-blocking streaming pose commands
+            # "motion.base",        # [选填] Mobile-base relative motion
+            # "motion.base_servo",  # [选填] Streaming base drive
+            # "motion.lift",        # [选填] Vertical torso/lifter position
+            # "motion.waist",       # [选填] Torso yaw rotation
+            # "motion.goal",        # [选填] Autonomous drive to a goal (nav stack)
+            # "motion.dual_arm",    # [选填] Two arms acting in coordination
             # "grasp.suction",      # [选填] Suction cup
             # "grasp.parallel",     # [选填] Parallel gripper
+            # "grasp.paddle",       # [选填] Two flat plates clamping a face each side
             # "vision.camera",      # [选填] RGB image stream
             # "vision.depth",       # [选填] Depth stream
             # "vision.detection",   # [选填] Object detection (needs detector service)
+            # "vision.eye_to_hand", # [选填] Camera fixed in base/world frame
+            # "vision.search",      # [选填] Body can look around for a target
+            # "planning.reachability",  # [选填] URDF-based reachability for planning
         }
     )
     name: str = "xxx"

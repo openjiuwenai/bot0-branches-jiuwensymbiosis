@@ -17,11 +17,10 @@ from __future__ import annotations
 import argparse
 import logging
 
-from jiuwensymbiosis.adapters.cruzr.grasp_planner import solve_grasp
-
 from jiuwensymbiosis.adapters.cruzr.api import CruzrApi
 from jiuwensymbiosis.adapters.cruzr.config import CruzrConfig
 from jiuwensymbiosis.adapters.cruzr.env import CruzrEnv
+from jiuwensymbiosis.adapters.cruzr.geometry import solve_grasp
 from jiuwensymbiosis.kinematics.urdf_chain import parse_chain
 from jiuwensymbiosis.perception.object_geometry import ObjectGeometry3D
 
@@ -29,19 +28,20 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="Cruzr box-grasp demo: detect → IK → (single-arm) reach."
+    ap = argparse.ArgumentParser(description="Cruzr box-grasp demo: detect → IK → (single-arm) reach.")
+    ap.add_argument("--dry-run", action="store_true", help="Detect and solve IK but do NOT move any joints.")
+    ap.add_argument(
+        "--single-arm",
+        action="store_true",
+        help="After IK, execute a low-speed left-arm reach (implies real hardware).",
     )
-    ap.add_argument("--dry-run", action="store_true",
-                    help="Detect and solve IK but do NOT move any joints.")
-    ap.add_argument("--single-arm", action="store_true",
-                    help="After IK, execute a low-speed left-arm reach (implies real hardware).")
-    ap.add_argument("--full", action="store_true",
-                    help="Run full orchestrated dual_arm_grasp pipeline: detect->IK->clamp->FT->lift.")
-    ap.add_argument("--object", default="box",
-                    help="Open-vocab detection prompt (e.g. 'box', 'white bin').")
-    ap.add_argument("--config", default="configs/cruzr/cruzr.yaml",
-                    help="Path to CruzrConfig YAML.")
+    ap.add_argument(
+        "--full",
+        action="store_true",
+        help="Run full orchestrated dual_arm_grasp pipeline: detect->IK->clamp->FT->lift.",
+    )
+    ap.add_argument("--object", default="box", help="Open-vocab detection prompt (e.g. 'box', 'white bin').")
+    ap.add_argument("--config", default="configs/cruzr/cruzr.yaml", help="Path to CruzrConfig YAML.")
     args = ap.parse_args()
 
     cfg = CruzrConfig.from_yaml(args.config)
@@ -95,16 +95,14 @@ def main() -> int:
 
     # --- Step 3: read lifter/waist q_fixed from live hardware ---
     q = env.low_level.get_joint_positions()
-    _fixed_names = ("lifter_pitch_1_joint", "lifter_pitch_2_joint",
-                    "lifter_pitch_3_joint", "waist_yaw_joint")
+    _fixed_names = ("lifter_pitch_1_joint", "lifter_pitch_2_joint", "lifter_pitch_3_joint", "waist_yaw_joint")
     q_fixed = {k: q.get(k, 0.0) for k in _fixed_names}
 
     # --- Step 4: solve dual-arm grasp IK ---
     plan = solve_grasp(box, left, right, q_fixed)
     logger.info("plan.ok=%s reason=%s", plan.ok, plan.reason)
     for arm in ("left", "right"):
-        logger.info("%s ik converged=%s pos_err_m=%s",
-                    arm, plan.ik[arm].converged, round(plan.ik[arm].pos_err_m, 4))
+        logger.info("%s ik converged=%s pos_err_m=%s", arm, plan.ik[arm].converged, round(plan.ik[arm].pos_err_m, 4))
 
     # --- Step 5: dry-run exits here ---
     if args.dry_run or not plan.ok:

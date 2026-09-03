@@ -79,7 +79,7 @@ mypy jiuwensymbiosis/
 
 ## Critical: Proxy Hygiene
 
-`clear_proxy_env()` (defined in `jiuwensymbiosis/utils/proxy.py`, exported from `jiuwensymbiosis.utils` and `jiuwensymbiosis`) **must** be called before `import openjiuwen`. HTTP proxy env vars cause `httpx` to require `socksio` and route localhost through proxy, breaking local vLLM/detection calls. The root `conftest.py` does this automatically for tests.
+`clear_proxy_env()` (defined in `jiuwensymbiosis/utils/proxy.py`, exported from `jiuwensymbiosis.utils` and `jiuwensymbiosis`) **must** be called before `import openjiuwen`. HTTP proxy env vars cause `httpx` to require `socksio` and route localhost through proxy, breaking local vLLM/detection calls. `tests/conftest.py` does this automatically for tests.
 
 ## Centralised Logging
 
@@ -110,7 +110,7 @@ Hardware Layer    XxxDriver — adapter author's main work (serial/CAN/socket)
 
 **Capability Gating**: Tools are emitted only for `api.capabilities ∩ env.capabilities`. Env declares what hardware can do (manual `frozenset`); Api derives capabilities from the actions it implements, plus any `capability` class attr for a marker capability no action advertises (automatic). `build_robot_tools(api, env=env)` enforces the intersection — an action whose capability isn't in env simply doesn't become an LLM tool. The capability comes from the action's own `ActionSpec`, never from whichever class declares the method.
 
-**Defaults & Components** (the mixin layer is gone): an action whose implementation is one line of delegation to an Env verb is a plain function in `api/defaults.py` that the adapter calls explicitly — `@implements(GOTO_XYZR)` then `return defaults.goto_xyzr(self, ...)` — so no base class is involved and the MRO stays flat. There is **no `api/components.py` and no held-component class** any more: the shared 3-D sensing and the base-approach loops are `api`-first functions in `perception/scene3d.py` (`locate_for_grasp` / `locate_for_place` / `analyze_scene`) and `motion/approach.py` (`search_target` / `approach_for_grasp` / `approach_for_place`), each resolving its own body hooks off the api it is handed (`detector_seg_fn`, `base_driver`, `grab_calibrated_frame`, …). The sensing *state* those loops read and write (`last_detection` / `last_surface`) lives on `BaseRobotApi` behind properties, and `api/memory.py`'s `ExecutionMemory` owns freshness across actions (an action that stales locations clears the cache through `invalidate_sensing_cache`). `Reachability` (`api/reachability.py`) is not an action provider at all — it is a planning-time judge the planner reads directly (`check_reachable` / `describe_reach`), gated by the *derived* capability `planning.reachability` (body holds a judge AND env ships the URDF). The vendor-specific vision work has no default and is implemented per adapter on top of `perception/vision.py` (`detect_and_centroid`, `apply_xy_correction`, `build_grasp_result`).
+**Defaults & Components** (the mixin layer is gone): an action whose implementation is one line of delegation to an Env verb is a plain function in `api/defaults.py` that the adapter calls explicitly — `@implements(GOTO_XYZR)` then `return defaults.goto_xyzr(self, ...)` — so no base class is involved and the MRO stays flat. There is **no `api/components.py` and no held-component class** any more: the shared 3-D sensing and the base-approach loops are `api`-first functions in `perception/scene3d.py` (`locate_for_grasp` / `locate_for_place` / `analyze_scene`) and `motion/approach.py` (`search_target` / `approach_for_grasp` / `approach_for_place`), each resolving its own body hooks off the api it is handed (`detector_seg_fn`, `base_driver`, `grab_calibrated_frame`, …). The sensing *state* those loops read and write (`last_detection` / `last_surface`) lives on `BaseRobotApi` behind properties, and `api/memory.py`'s `ExecutionMemory` owns freshness across actions (an action that stales locations clears the cache through `invalidate_sensing_cache`). `Reachability` (`api/reachability.py`) is not an action provider at all — it is a planning-time judge the planner reads directly (`check_reachable` / `describe_reach`), gated by the *derived* capability `planning.reachability` (body holds a judge AND env ships the URDF). The vendor-specific vision work has no default and is implemented per adapter on top of `perception/vision.py` (`detect_and_centroid`, `apply_xy_correction`, `default_get_grasp_info_simple`, `default_pixel_to_base_xyz`).
 
 **One contract, one carrier, one decorator**: `ActionSpec` (declared in `api/decorators.py`, next to the carrier) is what an action IS; `ToolMeta` is what `@implements(SPEC)` pins to a method — that spec plus `input_params`, the call schema derived from *this body's* signature. `ToolMeta` **holds** its spec instead of copying it, so the contract fields exist in one place and a planner cannot read a different answer from the vocabulary. `build_robot_tools` walks the MRO, finds the decorated methods, binds them, and wraps them as openjiuwen `LocalFunction` tools.
 
@@ -128,10 +128,10 @@ There is no second decorator for "a tool only this body has". Both agent paths b
 **RobotSession Lifecycle**: `RobotSession` is a context manager — `__enter__` calls `connect()` (env + sidecars), `__exit__` calls `disconnect()`. Both are idempotent. Sidecars (e.g., detection subprocess) are started/stopped automatically.
 
 **Known Capabilities** (defined in `env/base.py:KNOWN_CAPABILITIES`):
-- arm — `motion.cartesian`, `motion.joint`, `motion.servo`
+- arm — `motion.cartesian`, `motion.joint`, `motion.servo`, `motion.dual_arm` (two arms acting in coordination)
 - mobile manipulator — `motion.base`, `motion.base_servo`, `motion.lift`, `motion.waist`, `motion.goal`
-- end effector — `grasp.suction`, `grasp.parallel`, `grasp.dual_arm`
-- sensing / planning — `vision.camera`, `vision.depth`, `vision.detection`, `vision.eye_to_hand`, `planning.reachability`
+- end effector — `grasp.suction`, `grasp.parallel`, `grasp.paddle` (two flat plates clamping a face on each side)
+- sensing / planning — `vision.camera`, `vision.depth`, `vision.detection`, `vision.eye_to_hand`, `vision.search`, `planning.reachability`
 - misc — `sorting.command`, `speech.tts`
 
 ### Safety & Auxiliary Rails
@@ -140,7 +140,7 @@ There is no second decorator for "a tool only this body has". Both agent paths b
 2. **RecoveryRail** — On motion/grasp failure, auto-homes + releases end-effector to return to safe state. The release step goes through a generic `release_effector()` hook, and homing consults `env.holding_payload` first — a body still carrying a payload must not be homed blindly (that would drop it).
 3. **VisualFeedbackRail** — Captures camera frame after every motion/grasp, injects into agent context for VLM result verification.
 4. **DiagnosisRail** — Online failure-feedback (Trace Feedback Loop P1): after a failed step, stages a compact diagnosis (current params + relevant recent history + system state) and flushes it into the next LLM turn via `before_model_call`; gated by `enable_diagnosis` (requires `enable_tracing`). Lives in `jiuwensymbiosis/rails/diagnosis.py`.
-5. **SkillUseRail** — Loads built-in `SKILL.md` docs and appends `RobotControlTool`; attached only when `RobotAgentConfig.enable_skill=True`. (`rails/__init__.py` re-exports SafetyRail / RecoveryRail / VisualFeedbackRail / DiagnosisRail; `SkillUseRail` lives in `agent/builder.py`.)
+5. **SkillUseRail** — Loads built-in `SKILL.md` docs and appends `RobotControlTool`; attached only when `RobotAgentConfig.enable_skill=True`. (`rails/__init__.py` re-exports SafetyRail / RecoveryRail / VisualFeedbackRail / DiagnosisRail; `SkillUseRail` comes from openjiuwen, re-exported via `agent/abstractions.py` and attached in `agent/builder.py`.)
 
 Note: `TraceRail` (see "Execution Trace & Replay" below) is another parallel rail that lives in `jiuwensymbiosis/agent/trace.py` — **not** under `rails/` — and is gated by `enable_tracing` rather than a safety flag.
 
@@ -169,15 +169,16 @@ The trace JSON is persisted to `<workspace>/traces/{conversation_id}_{timestamp}
 
 `jiuwensymbiosis-replay <trace.json>` prints a text timeline of steps, rail events, log events, and frame paths. Set `trace_console=True` for a live one-line-per-step dashboard during the run.
 
-### Hardware Adapter Pattern (6 files)
+### Hardware Adapter Pattern (7 files)
 
 New robot types follow this pattern under `jiuwensymbiosis/adapters/<name>/`:
 1. `config.py` — `@dataclass` with `from_yaml()`/`from_dict()`
 2. `lowlevel.py` — Driver implementing the **capability-sliced** Protocols in `env/protocol.py`: `RobotDriver` is only `close()`, and a body implements the slices matching what it declares — `CartesianDriver` / `JointDriver` / `ServoDriver` / `BaseDriver` / `ContinuousBaseDriver` / `LifterDriver` / `WaistDriver` / `DualArmDriver` / `CameraDriver` / `SuctionDriver` / `GripperDriver` / `VisionDriver`. A mobile dual-arm body owes nothing to the single-arm Cartesian contract.
 3. `env.py` — `BaseRobotEnv` subclass: `capabilities` frozenset, `connect`/`disconnect`/`get_observation`, expose `home_pose`/`tool_offset_mm` plus whichever SafetyRail envelopes the hardware can actually state (`z_min_safe`/`workspace_bounds`/`joint_limits`/`base_step_limits`/`lift_limits`/`waist_step_limit_rad`; each defaults to `None` = unchecked), and `holding_payload` if the body can carry something
-4. `api.py` — Multi-inherits Mixins + `BaseRobotApi`; overrides geometry-specific methods, implements vision methods
-5. `session.py` — `make_builder(cfg_cls, env_cls, api_cls, ...)` one-liner; `api_kwargs_from_cfg` accepts a declarative list (`["cfg_attr"` or `"cfg_attr:api_kwarg"`, dotted paths OK) so same/near-named cfg→Api field mapping needs no hand-written extractor, and `make_detector_sidecar()` provides the standard detection-server sidecar
-6. `config_template.yaml` — YAML template with Chinese annotations
+4. `api.py` — Subclasses `BaseRobotApi` (the mixin layer is gone); every action is an explicit `@implements(SPEC)` method, forwarding to `api/defaults.py` where the body adds nothing; overrides geometry-specific methods, implements vision methods
+5. `calibration.py` — Optional hand-eye calibration wrapper exposing `CALIBRATION_ADAPTER_SPEC` (see the calibration section)
+6. `session.py` — `make_builder(cfg_cls, env_cls, api_cls, ...)` one-liner; `api_kwargs_from_cfg` accepts a declarative list (`["cfg_attr"` or `"cfg_attr:api_kwarg"`, dotted paths OK) so same/near-named cfg→Api field mapping needs no hand-written extractor, and `make_detector_sidecar()` provides the standard detection-server sidecar
+7. `config_template.yaml` — YAML template with Chinese annotations
 
 Template at `templates/xxx_adapter/`. Validate statically with `scripts/validate_adapter.py`; smoke-test runtime behavior (every action callable + JSON-serializable, driven by a stub driver) with
 `scripts/smoke_test_adapter.py --module <adapter>`.
@@ -231,7 +232,7 @@ limit relaxations.
 
 ### Visual Perception Pipeline
 
-Detection runs as a subprocess (GroundingDINO + SAM2) via `perception/detector_sidecar.py`. `RobotSession` manages lifecycle. The body-agnostic `perception/` package provides the shared pipeline: `detector_client.init_detector()`, `vision.detect_and_centroid()`, `vision.apply_xy_correction()`, `object_geometry` (mask → 3D extent), and `scene3d` (the detect → centroid → project → correct → geometry chain behind `Scene3DMixin`).
+Detection runs as a subprocess (GroundingDINO + SAM2) via `perception/detector_sidecar.py`. `RobotSession` manages lifecycle. The body-agnostic `perception/` package provides the shared pipeline: `detector_client.init_detector()`, `vision.detect_and_centroid()`, `vision.apply_xy_correction()`, `object_geometry` (mask → 3D extent), and `scene3d` (the detect → centroid → project → correct → geometry chain behind `api/defaults.py`'s sensing forwarders).
 
 ### Workspace Resolution
 
@@ -241,35 +242,39 @@ Priority: explicit `workspace` arg > `$JIUWENSYMBIOSIS_WORKSPACE` env var > `~/.
 
 ```
 jiuwensymbiosis/          # Main package
-  agent/                  # RobotSession, build_robot_agent, RobotAgentConfig, ModelSpec, MockModel (--mock)
+  agent/                  # RobotSession, build_robot_agent, RobotAgentConfig, ModelSpec,
+                          #   mock_model.py (build_mock_model, --mock)
     fast/                 # Two-tier planner (plan_task), sequence validator, runner, skill registry
   api/                    # BaseRobotApi, actions.py (shared ActionSpec vocabulary),
                           #   decorators.py (ActionSpec + ToolMeta), @implements,
+                          #   defaults.py (generic forwarders), reachability.py (planning-time judge),
                           #   state.py (state vocabulary), memory.py (ExecutionMemory), world_state.py
   env/                    # BaseRobotEnv, MockArmEnv, KNOWN_CAPABILITIES, protocol.py (driver Protocols)
   tools/                  # build_robot_tools, RobotControlTool, InProcessCodeTool
   rails/                  # SafetyRail, RecoveryRail, VisualFeedbackRail, DiagnosisRail
   skills/                 # Built-in SKILL.md files (visual_pick, visual_place, transport)
   perception/             # Body-agnostic vision: frame, calibration, object_geometry, scene3d
-  motion/                 # Body-agnostic base motion: base_goal, approach, diff_drive
+  motion/                 # Body-agnostic motion: base_goal, approach, diff_drive, dual_arm, lift
   adapters/
     piper/                # Piper 6-DoF reference adapter (6-DoF + gripper + wrist vision)
     so101/                # SO-101 5-DoF arm (gripper + eye-to-hand camera)
     cruzr/                # Cruzr mobile dual-arm (base + lifter + waist + paddle grasp)
-    _common/              # Shared adapter utilities (builder, detector, vision, calibration)
+    _common/              # Shared adapter building blocks (builder, capability_spec, geometry,
+                          #   joint_transport, kinematic_driver, kinematics, lerobot_backend, safety)
   calibration/            # Body-agnostic hand-eye calibration subsystem (see above)
   gui/                    # NiceGUI browser UI; pages/ + per-tool engines (run/perception/calibration)
   serving/                # Visual perception server subprocess (GroundingDINO + SAM2)
+  voice/                  # Voice loop: wake word, ASR, TTS (--voice in run_task)
   contracts.py            # Action result shapes + the spatial-relation set. Owned by no layer
                           #   (api/ promises them, perception/ + motion/ build them) and imports
                           #   nothing, so neither side depends on the other. Keep it dependency-free.
   introspect.py           # Machine-readable actions / skills / state views (the CLI's backend)
-  utils/                  # proxy hygiene (proxy.py), centralised logging (logging.py)
+  utils/                  # proxy hygiene (proxy.py), centralised logging (logging.py), geometry
 configs/{piper,so101,cruzr}/  # Per-body YAML; the top-level `adapter:` key picks the session builder
 templates/xxx_adapter/    # Adapter skeleton for new hardware
 tests/
   unit_tests/             # Mirrors package structure
-  mocks/                  # MockApi, MockEnv, MockDriver, MockScene
+  mocks/                  # MockApi, MockArmEnvWrapper, MockPiperDriver, MockDualArm*, MockScene
   integration/            # Hardware/GPU-dependent tests
 scripts/validate_adapter.py  # Static compatibility checker for new adapters
 scripts/smoke_test_adapter.py # Runtime smoke test: drive each action with a stub driver
