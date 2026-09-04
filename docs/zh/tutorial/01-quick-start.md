@@ -71,6 +71,9 @@ python -m pip install -e ".[piper]"
 # SO-101 / LeRobot（Python 3.12）
 python -m pip install -e ".[so101]"
 
+# Cruzr 移动双臂（pinocchio 臂 IK；rclpy 由 ROS 工作区提供）
+python -m pip install -e ".[cruzr]"
+
 # ASR 与录音
 python -m pip install -e ".[voice]"
 
@@ -81,7 +84,7 @@ python -m pip install -e ".[gui]"
 python -m pip install -e ".[calib]"
 ```
 
-可选依赖可以组合安装，例如 `.[full,piper]` 或 `.[full,so101]`；凡是包含 `[full]` 的命令，仍需使用上方 PyTorch CUDA 12.8 附加源。
+可选依赖可以组合安装，例如 `.[full,piper]` 或 `.[full,so101]` 或 `.[full,cruzr]`；凡是包含 `[full]` 的命令，仍需使用上方 PyTorch CUDA 12.8 附加源。
 
 ## 6. 安装固定版本的运行依赖
 

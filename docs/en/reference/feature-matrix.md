@@ -23,7 +23,7 @@ Support means that a code path and interface exist; it does not certify every ro
 | Session entry | `MockArmEnv` + Mock Api/Model | `build_piper_session` | `build_so101_session` | `build_cruzr_session` |
 | Cartesian motion | ✅ In-memory pose | ✅ XYZ/R plus full `goto_pose` | ✅ XYZ plus best-effort orientation IK | — |
 | Joint motion | — | ✅ Six joints | ✅ Five arm joints | ✅ Dual arms (named joint, radians) |
-| Real-time servo | ✅ Simulated sink | ✅ `servo_to_tip`/`servo_to_flange` | ✅ `servo_to_tip`/`servo_to_flange` | — |
+| Real-time servo | ✅ Simulated sink | ✅ `servo_to_tip`/`servo_to_flange` (driven by fast-path servo ops) | ✅ `servo_to_tip`/`servo_to_flange` (driven by fast-path servo ops) | — |
 | Mobile base | — | — | — | ✅ `navigate_relative`/`rotate_base`/`drive_arc`; continuous `base_servo` |
 | Lift / waist | — | — | — | ✅ `set_lift_pose`/`lift_to_clearance`/`turn_waist` |
 | Target approach | — | — | — | ✅ `approach_for_grasp`/`approach_for_place` (`motion.goal`) |
@@ -34,9 +34,9 @@ Support means that a code path and interface exist; it does not certify every ro
 | RGB | ✅ Synthetic image | ◐ Wrist RealSense | ◐ Desktop RealSense D405 | ✅ Waist + head, dual cameras |
 | Depth | ◐ Test scenes can provide it, but `vision.depth` is not advertised | ◐ With camera enabled | ◐ With camera enabled | ✅ Waist RGBD |
 | Open-vocabulary detection | ✅ Test/simulation path | ◐ Camera plus detector service | ◐ Camera plus detector service | ◐ Camera plus detector service |
-| Active search | — | — | — | ✅ `vision.search` + `search_target` (head/waist sweep) |
-| Camera mounting | Synthetic scene | Eye-in-hand | Eye-to-hand | Eye-to-hand (static waist + moving head) |
-| Hand-eye transform | Test geometry | `T_base_flange(live) @ T_flange_cam` | Fixed `T_base_cam` | Fixed `T_base_cam` (waist) |
+| Active search | — | — | — | ✅ `vision.search` + `search_target` (check head/waist cameras at the current heading and report bearing) |
+| Camera mounting | Synthetic scene | Eye-in-hand | Eye-to-hand | Eye-to-hand (waist + moving head) |
+| Hand-eye transform | Test geometry | `T_base_flange(live) @ T_flange_cam` | Fixed `T_base_cam` | Live `T_base_cam` (TF lookup with static-calibration fallback; head computed from live joints) |
 | Reachability (URDF) | — | — | — | ✅ `planning.reachability` (dual-arm + adaptive-lift judge) |
 | Detector sidecar | — | ◐ `detector.spawn=true` | ◐ `detector.spawn=true` | ◐ (`api_servers`) |
 | Main optional dependency | `dev` for tests | `piper`; add `full` for vision | Python 3.12 + `so101`; add `full` for vision | `cruzr`; add `full` for vision; source the ROS workspace at runtime |
@@ -56,7 +56,7 @@ Capability axes are **orthogonal and freely combinable**: motion (cartesian/join
 |---|---|---|---|---|---|---|
 | `motion.cartesian` | `CartesianDriver` | `goto_xyzr`, `goto_pose`, `move_direction`, `get_pose`, `get_home_pose` | ✅ | ✅ | ✅ | — |
 | `motion.joint` | `JointDriver`/`NamedJointDriver` | `move_joint`, `move_named_joint`, `get_joint_positions` | — | ✅ | ✅ | ✅ |
-| `motion.servo` | `ServoDriver` + fast-controller hook | — (no standalone public action; reachable via `robot_control`) | ✅ | ✅ | ✅ | — |
+| `motion.servo` | `ServoDriver` + fast-controller hook | — (no standalone public action; driven by fast-path real-time servo ops) | ✅ | ✅ | ✅ | — |
 | `motion.base` | Env verbs `navigate_relative`/`navigate_arc` | `navigate_relative`, `rotate_base`, `drive_arc` | — | — | — | ✅ |
 | `motion.base_servo` | Env verbs `start_base_drive` etc. | — (continuous base-drive primitive) | — | — | — | ✅ |
 | `motion.lift` | Env verb `set_lifter` | `set_lift_pose`, `lift_to_clearance` | — | — | — | ✅ |
@@ -68,8 +68,8 @@ Capability axes are **orthogonal and freely combinable**: motion (cartesian/join
 | `grasp.suction` | `SuctionDriver` | `activate_suction`, `deactivate_suction` | — | — | — | — |
 | `vision.camera` | `grab_rgb`/`grab_calibrated_frame` | `get_image`, `pixel_to_base_xyz` | ✅ | ◐ | ◐ | ✅ |
 | `vision.depth` | `grab_calibrated_frame` | — (no standalone action) | — | ◐ | ◐ | ✅ |
-| `vision.detection` | `vision.detect_and_centroid` + raw projection seam | `get_grasp_info_simple`, `locate_for_grasp`, `locate_for_place`, `analyze_scene` | ✅ | ◐ | ◐ | ◐ |
-| `vision.eye_to_hand` | Camera-mount marker | — (no standalone action) | — | — | ◐ | ✅ |
+| `vision.detection` | Calibrated `CameraFrame` + detector hook + `perception/scene3d` | `get_grasp_info_simple`, `locate_for_grasp`, `locate_for_place`, `analyze_scene` | ✅ | ◐ | ◐ | ◐ |
+| `vision.eye_to_hand` | Camera-mount marker | — (no standalone action) | — | — | ◐ | — |
 | `vision.search` | `motion/approach.search_target` | `search_target` | — | — | — | ✅ |
 | `planning.reachability` | `Reachability` (derived) | — (planning-time judge) | — | — | — | ✅ |
 | `sorting.command` | Vocabulary and adapter extension point | — (no built-in generic tool) | — | — | — | — |
@@ -89,7 +89,7 @@ The framework fully defines `grasp.suction`, but this repository has no built-in
 | Skill workflows | ◐ | `enable_skill=False` | Enables `SkillUseRail` and `RobotControlTool`; built-in `visual_pick`/`visual_place`/`transport` |
 | Custom tools/Rails | ✅ | None | Inject through `extra_tools` and `extra_rails` |
 | Parallel tool calls | ◐ | `parallel_tool_calls=False` | Only for audited non-motion tools; motion/grasp rejects it, and it cannot run with Trace |
-| No-hardware/no-model dry run | ✅ | With `--mock` | `MockArmEnv` + `MockModel` (Piper only); no CAN, camera, or model endpoint |
+| No-hardware/no-model dry run | ✅ | With `--mock` | `MockArmEnv` + `MockModelClient` (factory `build_mock_model`, Piper only); no CAN, camera, or model endpoint |
 
 ## 5. Rails, Trace, and feedback matrix
 
@@ -116,12 +116,12 @@ The framework fully defines `grasp.suction`, but this repository has no built-in
 | Detector sidecar lifecycle | ✅ | `make_detector_sidecar()` follows Session lifecycle |
 | Mask centroid and median depth | ✅ | `scene3d.locate_for_grasp`/`analyze_scene` |
 | Eye-in-hand projection | ✅ | Piper implementation; needs `T_flange_cam` and live flange pose |
-| Eye-to-hand projection | ✅ | SO-101 / Cruzr implementation; needs fixed `T_base_cam` |
+| Eye-to-hand projection | ✅ | SO-101 uses fixed `T_base_cam`; Cruzr prefers live TF with static-calibration fallback |
 | Multi-point/translation XY correction | ✅ | `apply_xy_correction()`; multi-point transform takes priority |
 | Grasp and place heights | ✅ | `grasp_z_offset_mm` and `place_z_offset_mm` applied uniformly |
-| Active search | ✅ | `motion/approach.search_target`: sweep in place, report bearing, converge |
+| Active search | ✅ | `motion/approach.search_target`: check cameras at the current heading, report bearing, and do not move; `approach_*` performs the sweep |
 | Reachability prior | ◐ | Derived `planning.reachability` when the body ships a URDF + arm chains; Cruzr provides a dual-arm + lift judge |
-| Hand-eye calibration script | ◐ | Install `calib`; see [Calibrate Hand-Eye Geometry](../how-to/calibrate-hand-eye.md) for Piper |
+| Hand-eye calibration script | ◐ | Install `calib`; see [Calibrate Hand-Eye Geometry](../how-to/calibrate-hand-eye.md) for Piper and [SO-101 Fixed-Camera Calibration](../how-to/calibrate-so101-eye-to-hand.md) for SO-101 |
 
 ## 7. User entry points and optional dependencies
 
@@ -135,7 +135,7 @@ The framework fully defines `grasp.suction`, but this repository has no built-in
 | Vision/GPU | ◐ | `pip install -e ".[full]"` with the CUDA 12.8 PyTorch index |
 | Browser GUI | ◐ | `pip install -e ".[gui]"`; `jiuwensymbiosis-gui`, default `127.0.0.1:8770` |
 | Voice front end | ◐ | `pip install -e ".[voice]"`; optional FunASR/capture, default `NullTTS` |
-| Hand-eye calibration | ◐ | `pip install -e ".[calib,piper]"` |
+| Hand-eye calibration | ◐ | `pip install -e ".[calib,piper]"` or `.[calib,so101]` |
 | Actions/skills/state introspection | ✅ | `jiuwensymbiosis-actions` / `-skills` / `-state` |
 | Trace replay | ✅ | `jiuwensymbiosis-replay` |
 | Unit tests | ✅ | `pip install -e ".[dev]"`; `pytest tests/unit_tests/` |

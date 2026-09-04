@@ -33,7 +33,7 @@
 |---|---|
 | 启动 | YAML → Adapter Config → `make_builder()` → Session(Env/Api/sidecars)；RobotAgentConfig + Session → `run_robot_task()` |
 | 普通工具调用 | Agent → Rail 前置检查 → Tool → `@implements` 方法 → `defaults`/共享算法 → Env 动词 → Driver → 硬件 |
-| 视觉工具调用 | `defaults` → `perception/scene3d` → 相机帧 → 检测 sidecar → 适配器 RAW 投影 → 共享校正与抓放几何 |
+| 视觉工具调用 | `defaults` → `perception/scene3d` → 适配器标定帧（RGB/depth/内参/外参）→ 检测 sidecar → 共享三维几何 |
 | 动态编排 | 每步前重测 `WorldState`，与下一步前置条件矛盾时自动重规划 |
 | 实时伺服 | `BackgroundTracker` 感知线程持续刷新最新目标 → `ServoController` 高频限斜率步进 → env 非阻塞伺服动词 |
 | 观测与诊断 | Driver/相机 → `RobotObservation`/工具结果 → VisualFeedback/Trace/Diagnosis → 下一轮模型或离线分析 |
@@ -50,7 +50,7 @@ README「核心特性」每一项都能落回具体的架构机制与对应章�
 | 环境 + 本体感知的动态编排 | 同一个任务**不是写死的序列**：规划器以当前本体状态 + 环境感知结果为输入，**不同环境编排出的动作序列不同**；执行中现实状态与前置条件矛盾时触发重规划 | 六、九                |
 | 执行记忆 | `ExecutionMemory`（`api/memory.py`），感知即入账、移动即作废 | 三                    |
 | 实时追踪伺服 | `agent/fast/realtime` 双速环：`BackgroundTracker` + `ServoController` | 六                    |
-| 主动搜索 | `search_target` 扫视报方位 → `approach_*` 逐步逼近 | 三、十                |
+| 主动搜索 | `search_target` 当前朝向报方位 → `rotate_base`/`approach_*` 转向并逐步逼近 | 三、十                |
 | 可达性推理 | 本体无关的 `kinematics`（URDF/FK/IK）+ 规划期判官 `Reachability` + `WorldState` 的 `reachable` 标注 | 四、六                |
 | 动作契约 | `ActionSpec` 的 `requires`/`provides`/`invalidates` + 位置新鲜度 | 三                    |
 | 安全闭环 | SafetyRail / RecoveryRail / VisualFeedbackRail / DiagnosisRail | 七                    |
@@ -112,7 +112,7 @@ env 还需暴露本体常量供上层几何与可达性使用：
 
 能力轴相互**正交、可自由组合**：双臂能否协同（`motion.dual_arm`）、能否升降/转腰（`motion.lift`/`motion.waist`）、能否转头找目标（`vision.search`）、夹持靠夹爪还是夹板（`grasp.parallel`/`grasp.paddle`）彼此独立。一个动作只属于一条能力，本体按需声明，能力组合成一条任务时按前提条件编排。
 
-框架内置 `MockArmEnv`（`jiuwensymbiosis/env/mock.py`），**无需任何硬件即可跑通整条链路**；配套 `MockModel`（`--mock` 时注入，`invoke` 返回固定文本、跳过 `api_key` 校验）在 LLM 侧对应，两者一起让"无硬件 + 无 LLM"的纯逻辑干跑真正闭环。
+框架内置 `MockArmEnv`（`jiuwensymbiosis/env/mock.py`），**无需任何硬件即可跑通整条链路**；配套 `MockModelClient`（工厂函数 `build_mock_model`，`--mock` 时注入，`invoke` 返回固定文本、跳过 `api_key` 校验）在 LLM 侧对应，两者一起让"无硬件 + 无 LLM"的纯逻辑干跑真正闭环。
 
 ---
 
@@ -120,19 +120,21 @@ env 还需暴露本体常量供上层几何与可达性使用：
 
 这一层是整个框架设计的核心，由三个符号组成：
 
-- **`ActionSpec`** —— 动作的契约，声明在 `api/actions.py`。它说一个动作「是什么」：名字、描述、能力门、参数名、结果形状、前置条件与效果、位置新鲜度与是否对规划器可见。
+- **`ActionSpec`** —— 动作的契约，类定义在 `api/decorators.py`，共享词表的各条 spec 实例集中在 `api/actions.py`。它说一个动作「是什么」：名字、描述、能力门、参数名、结果形状、前置条件与效果、位置新鲜度与是否对规划器可见。
 - **`@implements(SPEC)`** —— 把一个方法绑定为某条契约在本体上的实现。契约**完全来自 spec**，实现方没有渠道对规划器说词表之外的话。它把 `ToolMeta`（spec + 由这个本体签名推导的 `input_params`）挂到方法上，`build_robot_tools` 据此把它们包装成 openjiuwen `LocalFunction` 工具。
 - **`api.defaults`** —— 一类动作的实现委托 Env 就能完成（`goto_xyzr` 就是 `env.move_to_flange(...)`），这些**自由函数**由适配器显式转发：`@implements(GOTO_XYZR)` 然后 `return defaults.goto_xyzr(self, ...)`。**不是基类**——继承会把不相关的动作捆绑进来，而函数只取所需的那一个。
 
-适配器示例：
+适配器示例（以 Cruzr 的 `search_target` 为例——无几何差异，一行转发 defaults）：
 
 ```python
-class PiperApi(BaseRobotApi):
-    @implements(GOTO_XYZR)
-    def goto_xyzr(self, x: float, y: float, z: float, r: float | None = None,
-                  *, orientation_policy: str = "top_down") -> None:
-        return defaults.goto_xyzr(self, x, y, z, r)
+class CruzrApi(BaseRobotApi):
+    @implements(SEARCH_TARGET)
+    def search_target(self, object_name: str = "box", reference: str | None = None,
+                      relation: str = "on") -> dict:
+        return defaults.search_target(self, object_name, reference, relation)
 ```
+
+注意 Piper 的 `goto_xyzr` 恰是**反例**：Piper 是倾斜工具（tip ≠ flange），它必须重写 `goto_xyzr` 做 tip→flange 换算而不是转发 defaults（见第十二节）。
 
 `BaseRobotApi.capabilities` 属性**自动反推**自本体实现的动作（每个 `@implements` 的 spec 贡献自己的能力），再加上声明的 marker 能力类属性（`motion.servo`、`planning.reachability` 等没有对应动作、只能靠属性声明）。**适配作者无需手动维护能力列表**——实现哪个动作就自动具备哪个能力，且不会广告本体没有的能力。
 
@@ -142,8 +144,9 @@ class PiperApi(BaseRobotApi):
 
 除了调用 schema，每条动作还携带：
 
-- `result` —— 结果字段的 JSON Schema，自动派生自 `TypedDict` 返回注解（失败/成功形状通常取并集，`contracts.py` 是这些结果类型的**唯一权威源**，归属任何层、不依赖包内其它模块——`api/` 承诺它们，`perception/`+`motion/` 构建它们）
+- `result` —— 结果字段的 JSON Schema，自动派生自 `TypedDict` 返回注解（失败/成功形状通常取并集，`contracts.py` 是这些结果类型的**唯一权威源**，不归属任何层、不依赖包内其它模块——`api/` 承诺它们，`perception/`+`motion/` 构建它们）
 - `requires` / `provides` / `invalidates` —— 本体自身状态，基于 `api/state.py:KNOWN_STATE_TOKENS` 的封闭词表
+- `opens_access` / `closes_access` —— 屏障开/闭语义（先拉开抽屉才能拿里面的东西；当前内置词表暂无动作声明，机制已就绪并被 `parse_sequence` 消费）
 - `produces_location` / `consumes_location` / `invalidates_locations` —— 位置新鲜度（一个感知到目标在哪的动作**产生**；一个移动底盘的动作**作废**所有从旧视角测得的位置，因为它们是从旧位置测量的）
 
 契约**从不编码顺序**——它只陈述前置条件和效果，让规划器**推导**一个合法顺序；`parse_sequence` 接受任何前置条件成立的排列。`WorldState.snapshot(session)` 在运行时用同样的词表汇报当前状态（观测覆盖推想；一个缺失的 token 表示**未知**，从不表示**false**）。
@@ -154,11 +157,11 @@ class PiperApi(BaseRobotApi):
 
 这个账本完全由动作契约自动驱动，**不需要任何手写缓存**——适配作者不维护、规划器也不猜测。记账走 best-effort 路径，记失败绝不把一个成功的机器人动作变成工具失败。`WorldState.snapshot` 的位置清单正是从这份账本的 `describe()` 读出来的，所以规划器与执行器看到的是同一份「已知信息」，已执行动作沉淀下来的状态会被后续步骤自动继承引用（`<bind>.field` 绑定）。
 
-### 视觉：共享管线 + 一个投影函数
+### 视觉：共享管线 + 显式投影动作
 
-`perception/` 提供本体无关的共享管线，`api/defaults` 的视觉动作向前转发。适配作者对视觉只需提供**一个投影函数**（`_project_pixel_to_base_raw`）：eye-in-hand 读实时法兰位姿组合 `T_base_flange @ T_flange_cam`，eye-to-hand 用固定 `T_base_cam`；**不做任何 xy/z 校正**（共享几何负责）。`scene3d` 的 `locate_for_grasp`/`locate_for_place`/`analyze_scene` 是检测→质心/中值深度→RAW 投影→校正→抓放几何整条链，`motion/approach` 的 `search_target`/`approach_for_grasp`/`approach_for_place` 是寻靶→对准目标面→收敛到工作位姿。z 数学与 ground-truth 只在一处发生。
+`perception/` 提供两类本体无关的共享能力。低层 `pixel_to_base_xyz` 由适配器显式绑定 `@implements(PIXEL_TO_BASE_XYZ)`：eye-in-hand 可转发 `perception/vision.default_pixel_to_base_xyz`（提供 `pose_to_tf` 回调，组合实时 `T_base_flange @ T_flange_cam`，并按标定应用 XY 校正），eye-to-hand 用 `T_base_cam` 实现。高层 `scene3d` 的 `locate_for_grasp`/`locate_for_place`/`analyze_scene` 则直接消费适配器提供的标定 `CameraFrame` 和检测器钩子，完成检测→三维点云→物体/表面几何；`api/defaults` 负责动作转发。`motion/approach` 的 `search_target`/`approach_for_grasp`/`approach_for_place` 复用这些感知结果完成寻靶、对准和逼近。适配器不复制这些共享检测与几何流程，只提供相机、标定变换和必要的本体钩子。
 
-**主动搜索**是这条链的起手式，且由能力 `vision.search` 单独门控：目标不在视野内时，`search_target` 原地扫视、只报**方位（bearing）**——它刻意**不产生坐标**（不 `produces_location`），因为一份没有世界坐标的读数不该污染位置新鲜度；得到方位后，`approach_*` 把它接过来：调头对准已感测到的方位 → 每轮逼近前重测，逐步收敛到可抓/可放的工作位姿。
+**主动搜索**由能力 `vision.search` 单独门控，分两层：动作 `search_target` 在**当前朝向**对各相机各看一眼、只报**方位（bearing）**——它刻意**不产生坐标**（不 `produces_location`），也不移动本体，因为一份没有世界坐标的读数不该污染位置新鲜度；它的典型消费者是 `rotate_base`（拿到 `bearing_rad` 先转头对准）。找不到目标时真正的**原地扫视**（逐步转动本体找目标）发生在 `approach_for_grasp`/`approach_for_place` 内部——正因为转动会作废所有已测位置，它绝不能是一个不带 `invalidates_locations` 的动作。逼近循环每轮重测、逐步收敛到可抓/可放的工作位姿。
 
 ---
 
@@ -174,7 +177,7 @@ class PiperApi(BaseRobotApi):
 
 **效果**：给一个只吸盘的机器人装上一个夹爪实现，夹爪工具根本不会出现在 LLM 面前。硬件不支持的能力对 agent 完全不可见，从源头杜绝"LLM 让吸盘机器人去开夹爪"这类问题。
 
-门控集合用 `env.effective_capabilities`（声明的能力 | + 由 URDF **派生**的 `planning.reachability`）。**`planning.reachability` 是派生的**：Api 侧是"本体持有一个可达性判断器"（`check_reachable`/`describe_reach`），Env 侧是"本体带着判官读的 URDF"——只有交集为真才算数，这阻止一个本体声称可达却没有任何模型。判官背后是本体无关的 `kinematics/`（URDF 解析 + FK + 数值 IK + 可达/自碰撞，纯 numpy，URDF 路径与关节名皆入参），也就是架构图里「本体感知」那一格。
+门控集合用 `env.effective_capabilities`（声明的能力 | + 由 URDF **派生**的 `planning.reachability`）。**`planning.reachability` 是派生的**：Api 侧是"本体持有一个可达性判断器"（`check_reachable`/`describe_reach`），Env 侧是"本体带着判官读的 URDF"——只有交集为真才算数，这阻止一个本体声称可达却没有任何模型。判官背后是本体无关的 `kinematics/`（URDF 解析 + FK + 数值 IK + 可达/自碰撞，numpy 为主、可选 pinocchio 加速，URDF 路径与关节名皆入参），也就是架构图里「本体感知」那一格。
 
 规划器有**两个入口**消费可达性，都是规划期判定而非运行时才被弹回：
 
@@ -224,7 +227,7 @@ class PiperApi(BaseRobotApi):
 
 这个「慢检测 / 快控制」的双速率分离，让秒级的 GroundingDINO+SAM2 也能驱动平滑的高频伺服——循环始终朝最新已知目标滑步，而不是等下一帧检测；丢失超过 `lost_target_grace_s` 才放弃。它对应 README 的「实时追踪伺服」：跟踪目标、高频发令，可跟随移动物体实时抓取。
 
-把成功的 Tier2 序列回炼成 SKILL.md **尚未实现**——今天新技能仍是手写（见上文「六、两级自主规划」）。
+把成功的 Tier2 序列回炼成 SKILL.md **尚未实现**——今天新技能仍是手写。
 
 ---
 
@@ -234,7 +237,7 @@ class PiperApi(BaseRobotApi):
 
 ### 1. SafetyRail —— 动作前的"软件预检"
 
-拦截 `goto_xyzr`/`goto_pose`/`move_joint`/`move_direction`/底盘/torso 命令，按声明能力派生检查：笛卡尔 → Z 下限 + XY 工作区；关节 → 关节软限位（`joint_limits`，单位与 env 的 `move_joint` 一致）；底盘/turn_waist → 单命令位移/转角上限；升降 → `lift_limits`。每个边界默认 `None` = **不检查**（类型/有限数仍查）。越限 `raise ValueError`（每类失败独立 message），被 openjiuwen 转成 tool-exception 回灌给 LLM **自行纠错**。它是硬件急停的**补充而非替代**。
+拦截 `goto_xyzr`/`goto_pose`/`move_joint`/`move_named_joint` 及底盘/腰/升降命令，按声明能力派生检查：笛卡尔 → Z 下限 + XY 工作区；关节 → 关节软限位（`joint_limits`，单位与 env 的 `move_joint` 一致）；底盘 → 单命令位移/转角上限；腰 → `waist_step_limit_rad`；升降 → `lift_limits`。每个边界默认 `None` = **不检查**（类型/有限数仍查）。越限 `raise ValueError`（每类失败独立 message），被 openjiuwen 转成 tool-exception 回灌给 LLM **自行纠错**。它是硬件急停的**补充而非替代**。
 
 ### 2. RecoveryRail —— 失败后自动归零
 
@@ -245,7 +248,7 @@ class PiperApi(BaseRobotApi):
 每次运动/抓取后抓一帧图像注入上下文，供 VLM 核验结果。需 `vision.camera` 能力。两阶段注入（`after_tool_call` 只暂存帧，`before_model_call` 才 flush），保证消息顺序合法（tool result 必须紧跟 tool call）。
 
 **另有**：
-> `SkillUseRail`（`agent/builder.py`），非安全 rail——仅 `enable_skill=True` 时附加，加载内置 `SKILL.md` 并附 `RobotControlTool`。
+> `SkillUseRail` 来自 openjiuwen（经 `agent/abstractions.py` 重导出），非安全 rail——在 `agent/builder.py` 中仅于 `enable_skill=True` 时附加，加载内置 `SKILL.md` 并附 `RobotControlTool`。
 > `TraceRail`（`agent/trace.py`），平行观测 rail，前面架构总览已述。
 > `DiagnosisRail`（`rails/diagnosis.py`），依赖 `TraceRail`，失败后把诊断证据注入下一轮模型调用——见[Trace Feedback Loop](../how-to/use-trace-feedback.md)。
 
@@ -290,15 +293,16 @@ invoke 结束写一次 JSON 到 `<workspace>/traces/{run_token}.json`；帧（�
 相机帧 (RGB + depth)
    │
    ▼
-scene3d.locate_for_grasp / analyze_scene
-   │   检测 → 最佳掩膜 + 质心 (u,v) + 中值深度
+适配器 grab_calibrated_frame → CameraFrame（RGB/depth/内参/T_base_cam）
+   │
    ▼
-适配器 _project_pixel_to_base_raw (eye-in-hand / eye-to-hand 的一步)
+scene3d.locate_for_grasp / locate_for_place / analyze_scene
+   │   检测 → 掩膜点云 → 物体/表面三维几何
    ▼
-apply_xy_correction / build_grasp_result  (共享几何：xy/z 校正 + 抓放高度)
-   ▼
-{position, grasp_position, place_position, ...}
+{center_mm, surface_z_mm, face_normal, ...}
 ```
+
+低层 `pixel_to_base_xyz` 是另一条显式动作：它把单个 `(u, v, depth_m)` 投影为 base-frame XYZ，不是 `scene3d` 内部的隐式接缝。
 
 `api/defaults` 的 `locate_for_grasp`/`locate_for_place`/`analyze_scene` 转发到 `perception/scene3d`，`search_target`/`approach_for_grasp`/`approach_for_place` 转发到 `motion/approach`——**与其他动作同一条实现路径**（无第二个通道）。
 
@@ -324,16 +328,18 @@ build_xxx_session = make_builder(
 
 ## 十二、接入新硬件的成本有多低
 
-答案是 **6 个文件 + 1 份 YAML**，其中大部分从模板拷贝后填空：
+答案是 **6 个必写 Python 文件 + 1 份 YAML**（外加 1 个可选标定 wrapper），其中大部分从模板拷贝后填空：
 
 | 你要写的文件 | 你实际做什么 | 是否可纯靠模板生成 |
 |---|---|---|
+| `__init__.py` | 重命名并导出 `build_<本体>_session` 包入口 | ✅ 替换占位符 |
 | `config_template.yaml` | 填写硬件参数（CAN 口、夹爪行程、安全 Z 下限等） | ✅ 中文注释逐项引导 |
 | `config.py` | `@dataclass` + `from_yaml()`/`from_dict()` | ✅ 模板已给 |
 | `lowlevel.py` | 驱动：串口/CAN/Socket 翻译成 `move_to_pose_blocking(pose, ...)` 等动词 | ⚠️ 唯一需要写真实硬件逻辑的地方 |
 | `env.py` | `BaseRobotEnv` 子类：声明 `capabilities` + 暴露安全/几何属性与本体常量 | ✅ 模板已给 |
 | `api.py` | `@implements(SPEC)` 绑定每一条动作；无差异的转发 `defaults`，有几何差异的写方法体 | ✅ 多数方法无需手写 |
 | `session.py` | `make_builder(...)` 一行 | ✅ 一行代码 |
+| `calibration.py`（可选） | 手眼标定 wrapper，暴露 `CALIBRATION_ADAPTER_SPEC`；实际拷到 `jiuwensymbiosis/calibration/adapters/<本体>.py` | ✅ 需要标定的本体才拷 |
 
 关键点在于：**`api.py` 里绝大多数方法无需自己实现**——`defaults` 的通用实现会把 `goto_xyzr` 这类高层动作委托给 `self.env.<动词>()`。只有当本体几何与标准假设不一致时才需重写（例如 Piper 是倾斜工具，tip ≠ flange，需重写 `goto_xyzr` 做 tip→flange 换算）。
 
@@ -352,11 +358,13 @@ python scripts/smoke_test_adapter.py --module jiuwensymbiosis.adapters.my_robot 
 2. **填 YAML** `config_template.yaml`（CAN 口、夹爪行程、Z 安全下限、工作区边界……）
 3. **写 `lowlevel.py`** —— 唯一的硬件逻辑：把厂商 SDK 翻译成 `move_to_pose_blocking(pose, ...)` / `set_gripper` / `grab_frames` 等动词
 4. **写 `env.py`** —— 声明 `capabilities` frozenset，暴露安全/几何属性与本体常量
-5. **写 `api.py`** —— `@implements(SPEC)` 绑定每条动作；**只有几何差异时**才写方法体；视觉只需实现投影函数 `_project_pixel_to_base_raw`（流程由 `scene3d`/`approach` 共享）
+5. **写 `api.py`** —— `@implements(SPEC)` 绑定每条动作；**只有几何差异时**才写方法体；视觉显式绑定 `pixel_to_base_xyz`，并提供 `scene3d`/`approach` 需要的相机、标定和检测钩子
 6. **写 `session.py`** —— `make_builder(...)` 一行
-7. **静态校验** `python scripts/validate_adapter.py --module jiuwensymbiosis.adapters.acme`
-8. **运行时冒烟** `python scripts/smoke_test_adapter.py --module jiuwensymbiosis.adapters.acme`
-9. **跑 mock** `python examples/run_task.py --config ... --mock` —— 无需真机先验证逻辑
+7. **更新 `__init__.py`** —— 重命名并导出 `build_acme_session`
+8. （可选）需要手眼标定时，拷 `calibration.py` 模板到 `jiuwensymbiosis/calibration/adapters/` 并暴露 `CALIBRATION_ADAPTER_SPEC`
+9. **静态校验** `python scripts/validate_adapter.py --module jiuwensymbiosis.adapters.acme`
+10. **运行时冒烟** `python scripts/smoke_test_adapter.py --module jiuwensymbiosis.adapters.acme`
+11. **跑 mock** `python examples/run_task.py --config ... --mock` —— 无需真机先验证逻辑
 
 **整个流程里，框架核心层（agent/api/env/tools/rails）无需改动。** 这是共享动作词表架构的杠杆点：把"形态差异"完全收敛进适配器目录，把"共性能力"沉淀为可组合的动作契约。
 
@@ -368,14 +376,14 @@ python scripts/smoke_test_adapter.py --module jiuwensymbiosis.adapters.my_robot 
 
 | 设计 | 收益 |
 |---|---|
-| `ActionSpec` 是动作的唯一契约 | 20/39 个动作曾携带 2–4 份漂移过的拷贝；一份契约不可能漂移 |
+| `ActionSpec` 是动作的唯一契约 | 重构前 20 个动作曾携带 2–4 份漂移过的拷贝；一份契约不可能漂移 |
 | `ToolMeta` 持有 spec 而非复制 | 契约字段存在一处，规划器读到的与词表承诺的一致 |
 | `@implements` 绑定每条动作 | 适配器文件就是本体的能力清单，取代基类元组 |
 | `defaults` 是自由函数而非基类 | 取一个动作不捆走它的邻居；MRO 保持平坦 |
 | 能力从 spec 推导 | 实现哪个动作就具备哪个能力，不会广告没有的能力 |
 | `api ∩ env` 交集门控工具 | 硬件不支持的能力对 LLM 不可见，防幻觉 |
 | env 是唯一硬件契约 | 换硬件只换 env + driver，上层零改动 |
-| `contracts.py` 归属任何层 | 结果形状唯一权威源，`api/` 与 `perception/`+`motion/` 互不依赖 |
+| `contracts.py` 不归属任何层 | 结果形状唯一权威源，`api/` 与 `perception/`+`motion/` 互不依赖 |
 | `Reachability` 是规划期判官 | 规划器直接读"当前够不够得着"，而非运行时才被 SafetyRail 弹回 |
 | 两级规划 + 运行时重规划 | 一次 LLM 往返编译出序列，世界反驳前置条件时才重规划 |
 | `ExecutionMemory` 契约驱动记账 | 感知即入账、移动即作废——规划器读到的一直是新鲜位置，无需手写缓存 |
@@ -389,7 +397,7 @@ python scripts/smoke_test_adapter.py --module jiuwensymbiosis.adapters.my_robot 
 
 ---
 
-**总结**：JiuwenSymbiosis 把"机器人形态的多样性"这个本质复杂度，用**共享动作契约 + 能力门控 + 单一硬件契约 + 可规划的前置/效果**几个机制收敛到了适配器目录里。对开发者而言，接入新硬件的成本被压缩到了 **1 份 YAML + 1 个驱动文件 + 4 个填空文件**，而 agent 层、安全层、工具层、感知层的能力是开箱即用的——只要 env 声明了对应能力，工具和安全策略就会自动就位；对不同本体，一条任务跨形态复用，同一本体上任务也能动态组合。运行时是一条「**感知 → 规划 → 执行 → 观测 → 反馈**」闭环：`ExecutionMemory` 保证世界状态始终新鲜，追踪/伺服双速环让抓放这类关键动作边感知边执行，结构化轨迹与回放让每次运行可复现、可复盘。
+**总结**：JiuwenSymbiosis 把"机器人形态的多样性"这个本质复杂度，用**共享动作契约 + 能力门控 + 单一硬件契约 + 可规划的前置/效果**几个机制收敛到了适配器目录里。对开发者而言，接入新硬件的成本被压缩到了 **1 份 YAML + 1 个驱动文件 + 5 个填空文件（外加 1 个可选标定 wrapper）**，而 agent 层、安全层、工具层、感知层的能力是开箱即用的——只要 env 声明了对应能力，工具和安全策略就会自动就位；对不同本体，一条任务跨形态复用，同一本体上任务也能动态组合。运行时是一条「**感知 → 规划 → 执行 → 观测 → 反馈**」闭环：`ExecutionMemory` 保证世界状态始终新鲜，追踪/伺服双速环让抓放这类关键动作边感知边执行，结构化轨迹与回放让每次运行可复现、可复盘。
 
 ---
 

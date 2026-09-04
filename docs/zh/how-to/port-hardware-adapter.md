@@ -2,7 +2,7 @@
 
 > 类别：How-to。本文说明如何把已经跑通的 Mock 适配器替换为可投产的真实硬件适配器。
 
-第一次接触适配器时，请先完成[构建第一个机器人适配器](../tutorial/02-build-first-adapter.md)。本文不重复完整六文件示例；Capability、Protocol、Env 属性、`@implements` 和 `make_builder()` 的精确契约统一查阅[机器人适配器参考](../reference/adapter-reference.md)。
+第一次接触适配器时，请先完成[构建第一个机器人适配器](../tutorial/02-build-first-adapter.md)。本文不重复“6 个必写 Python 文件 + 1 份 YAML（外加可选标定 wrapper）”的完整示例；Capability、Protocol、Env 属性、`@implements` 和 `make_builder()` 的精确契约统一查阅[机器人适配器参考](../reference/adapter-reference.md)。
 
 ## 使用范围与完成标准
 
@@ -175,10 +175,11 @@ def goto_xyzr(self, x: float, y: float, z: float, r: float | None = None) -> Non
 
 这个示例只适用于沿基座 Z 轴的标量偏移。倾斜工具必须使用完整变换，不能照搬 `z + offset`。
 
-视觉适配器只实现原始投影接缝 `_project_pixel_to_base_raw()`。以 eye-to-hand 为例：
+视觉适配器用 `@implements(PIXEL_TO_BASE_XYZ)` 实现 `pixel_to_base_xyz()` 投影动作。以 eye-to-hand 为例：
 
 ```python
-def _project_pixel_to_base_raw(self, u: float, v: float, depth_m: float) -> np.ndarray:
+@implements(PIXEL_TO_BASE_XYZ)
+def pixel_to_base_xyz(self, u: float, v: float, depth_m: float) -> dict:
     driver = self.env.low_level
     if driver is None:
         raise RuntimeError("env not connected")
@@ -190,10 +191,11 @@ def _project_pixel_to_base_raw(self, u: float, v: float, depth_m: float) -> np.n
     if intrinsics is None or tf_base_cam is None:
         raise RuntimeError("eye-to-hand calibration unavailable")
     p_cam = pixel_and_depth_to_camera_xyz((u, v), depth_m, intrinsics)
-    return apply_transform(tf_base_cam, p_cam)
+    xyz = apply_transform(tf_base_cam, p_cam)
+    return {"x": float(xyz[0]), "y": float(xyz[1]), "z": float(xyz[2])}
 ```
 
-eye-in-hand 使用实时法兰位姿组合 `T_base_cam = T_base_flange(live) @ T_flange_cam`。该方法只能做原始坐标变换，不能应用 XY/Z 校正；`perception/scene3d` 统一负责检测、质心与深度、校正和抓放高度，确保每项只执行一次。`get_image()`、`get_grasp_info_simple()`、`pixel_to_base_xyz()` 已由 `api.defaults` 转发到共享实现；仅在确有机型专属语义时覆写 `analyze_scene()`。
+eye-in-hand 可把该动作转发给 `perception/vision.default_pixel_to_base_xyz()`，并提供把实时法兰位姿转换成 `T_base_flange` 的 `pose_to_tf` 回调；共享实现再组合 `T_base_cam = T_base_flange(live) @ T_flange_cam`。`get_image()` 可由 `api.defaults` 转发；`pixel_to_base_xyz()` 和 `get_grasp_info_simple()` 则是适配器显式绑定的 `@implements` 动作，eye-in-hand 本体可复用 `perception/vision` 中的对应共享实现。面向场景的 `locate_for_grasp()`、`locate_for_place()` 和 `analyze_scene()` 由 `perception/scene3d` 处理标定帧、检测与三维几何，适配器只在确有机型专属语义时覆写。
 
 ## 4. 接入检测、标定与校正
 

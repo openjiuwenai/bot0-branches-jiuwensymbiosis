@@ -35,7 +35,7 @@ Key call paths:
 |---|---|
 | Startup | YAML → Adapter Config → `make_builder()` → Session(Env/Api/sidecars); RobotAgentConfig + Session → `run_robot_task()` |
 | Ordinary tool | Agent → Rail precheck → Tool → `@implements` method → `defaults`/shared algorithm → Env verb → Driver → hardware |
-| Visual tool | `defaults` → `perception/scene3d` → camera frames → detector sidecar → adapter raw projection → shared correction and grasp/place geometry |
+| Visual tool | `defaults` → `perception/scene3d` → adapter calibrated frame (RGB/depth/intrinsics/extrinsics) → detector sidecar → shared 3-D geometry |
 | Dynamic orchestration | Re-measure `WorldState` before each step; re-plan when it contradicts the next step's pre-conditions |
 | Realtime servo | `BackgroundTracker` perception thread keeps refreshing the latest target → `ServoController` high-rate slew-limited stepping → env non-blocking servo verb |
 | Evidence | Driver/camera → `RobotObservation`/tool result → VisualFeedback/Trace/Diagnosis → next model turn or offline analysis |
@@ -52,7 +52,7 @@ Every item in the README "Core Features" list lands on a concrete mechanism and 
 | Environment- and body-aware dynamic orchestration | The same task is **not a fixed sequence** — the planner takes the live body state + ambient sensing as input and **different environments produce different sequences**; at run time a conflict with a pre-condition triggers re-planning | 6, 9 |
 | Execution memory | `ExecutionMemory` (`api/memory.py`): sensing books it in, a move invalidates it | 3 |
 | Real-time tracking servo | `agent/fast/realtime` dual-rate loop: `BackgroundTracker` + `ServoController` | 6 |
-| Active search | `search_target` sweeps and reports a bearing → `approach_*` closes in step by step | 3, 10 |
+| Active search | `search_target` reports a bearing at the current heading → `rotate_base`/`approach_*` turns and closes in | 3, 10 |
 | Reachability reasoning | Body-agnostic `kinematics` (URDF/FK/IK) + planning-time judge `Reachability` + `reachable` annotation in `WorldState` | 4, 6 |
 | Action contracts | `ActionSpec`'s `requires`/`provides`/`invalidates` + location freshness | 3 |
 | Safety loop | SafetyRail / RecoveryRail / VisualFeedbackRail / DiagnosisRail | 7 |
@@ -114,7 +114,7 @@ Defined in `env/base.py`, the framework-wide closed vocabulary:
 
 Capability axes are **orthogonal and freely combinable**: whether two arms coordinate (`motion.dual_arm`), whether the body lifts/turns (`motion.lift`/`motion.waist`), whether it searches for a target (`vision.search`), and whether grasping is by gripper or paddle (`grasp.parallel`/`grasp.paddle`) are all independent. One action belongs to exactly one capability; a body declares what it has, and a task is orchestrated across capabilities by pre-conditions.
 
-The framework ships `MockArmEnv` (`jiuwensymbiosis/env/mock.py`), which runs the **whole chain with no hardware**; its LLM counterpart is `MockModel` (injected on `--mock`, `invoke` returns fixed text and skips `api_key` validation). Together they close the loop for a "no hardware + no LLM" pure-logic dry run.
+The framework ships `MockArmEnv` (`jiuwensymbiosis/env/mock.py`), which runs the **whole chain with no hardware**; its LLM counterpart is `MockModelClient` (created by `build_mock_model`, injected on `--mock`, returning fixed text and skipping `api_key` validation). Together they close the loop for a "no hardware + no LLM" pure-logic dry run.
 
 ---
 
@@ -122,19 +122,21 @@ The framework ships `MockArmEnv` (`jiuwensymbiosis/env/mock.py`), which runs the
 
 This layer is the heart of the framework, made of three symbols:
 
-- **`ActionSpec`** — the contract of an action, declared in `api/actions.py`. It states what an action **is**: name, description, capability gate, parameter names, result shape, pre-conditions and effects, location freshness, and whether it is visible to the planner.
+- **`ActionSpec`** — the contract class defined in `api/decorators.py`; shared vocabulary instances live in `api/actions.py`. It states what an action **is**: name, description, capability gate, parameter names, result shape, pre-conditions and effects, location freshness, and whether it is visible to the planner.
 - **`@implements(SPEC)`** — binds a method as one body's implementation of a contract. The contract comes **entirely from the spec**; an implementation has no channel for telling the planner something outside the vocabulary. It attaches a `ToolMeta` (the spec + `input_params`, the call schema derived from *this* body's signature), which `build_robot_tools` wraps into openjiuwen `LocalFunction` tools.
 - **`api.defaults`** — actions whose implementation is one line of delegation to an Env verb (`goto_xyzr` is `env.move_to_flange(...)`). These **free functions** are called explicitly by the adapter: `@implements(GOTO_XYZR)` then `return defaults.goto_xyzr(self, ...)`. **Not a base class** — inheritance would bundle unrelated actions, and the MRO would decide which of two mixins won a name. A function takes only what it needs.
 
-Adapter example:
+Adapter example (Cruzr's `search_target` has no body-specific geometry and forwards in one line):
 
 ```python
-class PiperApi(BaseRobotApi):
-    @implements(GOTO_XYZR)
-    def goto_xyzr(self, x: float, y: float, z: float, r: float | None = None,
-                  *, orientation_policy: str = "top_down") -> None:
-        return defaults.goto_xyzr(self, x, y, z, r)
+class CruzrApi(BaseRobotApi):
+    @implements(SEARCH_TARGET)
+    def search_target(self, object_name: str = "box", reference: str | None = None,
+                      relation: str = "on") -> dict:
+        return defaults.search_target(self, object_name, reference, relation)
 ```
+
+Piper's `goto_xyzr` is deliberately the counterexample: its tilted tool means tip != flange, so it overrides the action to perform tip-to-flange conversion rather than forwarding to `defaults` (see section 12).
 
 `BaseRobotApi.capabilities` is **auto-derived** from the actions a body implements (each `@implements` spec contributes its capability), plus any declared marker-capability class attribute (`motion.servo`, `planning.reachability`, which have no corresponding action). **The adapter author never maintains a capability list by hand** — implementing an action automatically grants its capability, and never advertises a capability the body has not got.
 
@@ -146,6 +148,7 @@ Beyond the call schema, every action carries:
 
 - `result` — the JSON Schema of result fields, auto-derived from a `TypedDict` return annotation (success and failure shapes usually merge into a union; `contracts.py` is the **single source of truth** for these result types — owned by no layer, imports nothing from the package, so `api/` promises them and `perception/`+`motion/` build them without a cycle)
 - `requires` / `provides` / `invalidates` — robot self-state, over the closed vocabulary in `api/state.py:KNOWN_STATE_TOKENS`
+- `opens_access` / `closes_access` — barrier-open/barrier-close effects (the mechanism is consumed by `parse_sequence`, although the built-in vocabulary currently declares none)
 - `produces_location` / `consumes_location` / `invalidates_locations` — location freshness (an action that senses where something is *produces*; one that moves the base *invalidates* every prior location, since they were measured from the old standpoint)
 
 A contract **never encodes an order** — it states pre-conditions and effects so a planner can *derive* a legal order; `parse_sequence` accepts any permutation whose pre-conditions hold. `WorldState.snapshot(session)` reports the same vocabulary at runtime (observation overrides belief; an absent token means *unknown*, never *false*).
@@ -156,11 +159,11 @@ A contract **never encodes an order** — it states pre-conditions and effects s
 
 The ledger is driven entirely by the action contract — **no hand-written cache** anywhere. Adapter authors do not maintain it and the planner never guesses. Bookkeeping is best-effort: a failed record can never turn a successful robot action into a tool failure. `WorldState.snapshot` reads its location list straight from this ledger's `describe()`, so planner and executor agree on what is known, and state settled by an earlier action is inherited by later steps (`<bind>.field`).
 
-### Vision: a shared pipeline plus one projection function
+### Vision: shared pipelines plus an explicit projection action
 
-`perception/` provides the body-agnostic shared pipeline, and the visual actions in `api/defaults` forward into it. An adapter contributes exactly **one projection function** (`_project_pixel_to_base_raw`): eye-in-hand combines the live flange pose `T_base_flange @ T_flange_cam`, eye-to-hand uses a fixed `T_base_cam`; **no xy/z correction** (the shared geometry owns that). `scene3d`'s `locate_for_grasp`/`locate_for_place`/`analyze_scene` are the detect→centroid/median-depth→raw projection→correction→grasp/place-geometry chain; `motion/approach`'s `search_target`/`approach_for_grasp`/`approach_for_place` are search→face the target→converge to a work pose. The z math and ground truth happen in one place.
+`perception/` provides two reusable surfaces. An adapter explicitly binds the low-level `pixel_to_base_xyz` action with `@implements(PIXEL_TO_BASE_XYZ)`: eye-in-hand bodies may forward to `perception/vision.default_pixel_to_base_xyz` with a `pose_to_tf` callback (combining live `T_base_flange @ T_flange_cam` and applying calibration XY correction), while eye-to-hand bodies implement it with `T_base_cam`. The higher-level `scene3d` functions `locate_for_grasp`/`locate_for_place`/`analyze_scene` consume a calibrated `CameraFrame` and detector hook directly to build object/surface geometry; `api/defaults` forwards the actions. `motion/approach` reuses those sensing results for search, alignment, and convergence. Adapters provide camera, calibration, detector, and body hooks rather than copying the shared detection and geometry pipelines.
 
-**Active search** is the opening move of that chain and is gated separately by the `vision.search` capability: when the target is out of view, `search_target` sweeps in place and reports only a **bearing** — it deliberately does **not** `produces_location`, because a reading with no world coordinate must not pollute location freshness. Given the bearing, `approach_*` takes over: it squares up to the sensed bearing, re-measures before each pass, and converges step by step to a graspable/placeable work pose.
+**Active search** is gated separately by `vision.search` and has two layers. The `search_target` action checks each camera at the **current heading**, reports only a **bearing**, and does not move the body or `produces_location`; its typical consumer is `rotate_base`. The actual in-place sweep, which turns the body when a target is missing, lives inside `approach_for_grasp`/`approach_for_place`. Because that turn invalidates prior locations, it cannot be hidden inside an action that lacks `invalidates_locations`. Each approach pass re-measures and converges toward a graspable/placeable work pose.
 
 ---
 
@@ -176,7 +179,7 @@ The key difference: the capability comes from the **action's own `ActionSpec`**,
 
 **Effect**: install a gripper implementation on a suction-only body, and the gripper tool never appears in front of the LLM. Capabilities the hardware lacks are entirely invisible to the agent, preventing "the LLM tells a suction robot to open the gripper" from the source.
 
-The gate set uses `env.effective_capabilities` (declared | + `planning.reachability` **derived** from a shipped URDF). **`planning.reachability` is derived**: the Api half is "the body holds a reach judge" (`check_reachable`/`describe_reach`), the Env half is "the body ships the URDF the judge reads" — only the intersection is true, which stops a body claiming reach while shipping no model. Behind the judge sits the body-agnostic `kinematics/` package (URDF parsing + FK + numerical IK + reach / self-collision, pure numpy, with the URDF path and joint names all passed in) — the "proprioception" cell in the architecture diagram.
+The gate set uses `env.effective_capabilities` (declared | + `planning.reachability` **derived** from a shipped URDF). **`planning.reachability` is derived**: the Api half is "the body holds a reach judge" (`check_reachable`/`describe_reach`), the Env half is "the body ships the URDF the judge reads" — only the intersection is true, which stops a body claiming reach while shipping no model. Behind the judge sits the body-agnostic `kinematics/` package (URDF parsing + FK + numerical IK + reach / self-collision, primarily NumPy with optional Pinocchio acceleration, with the URDF path and joint names all passed in) — the "proprioception" cell in the architecture diagram.
 
 The planner consumes reachability through **two entry points**, both planning-time judgments rather than a run-time bounce off SafetyRail:
 
@@ -226,7 +229,7 @@ A grasp/place need not be a single-shot "snap one frame → compute once → dri
 
 This "slow detection / fast control" split is what lets a seconds-scale GroundingDINO+SAM2 drive a smooth high-rate servo: the loop always slews toward the freshest known target instead of stalling on the next frame, and only gives up once the target is lost for `lost_target_grace_s`. This is README's "real-time tracking servo": track the target, stream high-frequency commands, and follow a moving object for real-time grasping.
 
-Distilling a successful Tier 2 sequence back into a SKILL.md is **not implemented**; today a new skill is authored by hand (see §6 "Two-tier autonomous planning" above).
+Distilling a successful Tier 2 sequence back into a SKILL.md is **not implemented**; today a new skill is authored by hand.
 
 ---
 
@@ -236,7 +239,7 @@ Distilling a successful Tier 2 sequence back into a SKILL.md is **not implemente
 
 ### 1. SafetyRail — a software precheck before motion
 
-Intercepts `goto_xyzr`/`goto_pose`/`move_joint`/`move_direction`/base/torso commands, deriving checks from declared capabilities: cartesian → Z floor + XY workspace; joint → joint soft limits (`joint_limits`, unit matching `move_joint`); base/turn_waist → per-command translation/turn caps; lift → `lift_limits`. Each boundary defaults to `None` = **no range check** (type/finite still run). Violations `raise ValueError` (per-failure message), converted by openjiuwen into a tool-exception fed back to the LLM **to self-correct**. It is a **complement to, not a replacement for**, the hardware E-stop.
+Intercepts `goto_xyzr`/`goto_pose`/`move_joint`/`move_named_joint` plus base, waist, and lift commands, deriving checks from declared capabilities: cartesian → Z floor + XY workspace; joint → joint soft limits (`joint_limits`, unit matching `move_joint`); base → per-command translation/turn caps; waist → `waist_step_limit_rad`; lift → `lift_limits`. Each boundary defaults to `None` = **no range check** (type/finite still run). Violations `raise ValueError` (per-failure message), converted by openjiuwen into a tool-exception fed back to the LLM **to self-correct**. It is a **complement to, not a replacement for**, the hardware E-stop.
 
 ### 2. RecoveryRail — automatic reset after failure
 
@@ -247,7 +250,7 @@ On motion/grasp failure, auto-`home()` + release the end effector. `home` consul
 Grabs a frame after every motion/grasp and injects it into context for VLM verification. Requires `vision.camera`. Two-phase injection (`after_tool_call` only stages the frame, `before_model_call` flushes it) keeps message order legal (a tool result must immediately follow its tool call).
 
 **Additionally**:
-> `SkillUseRail` (`agent/builder.py`), not a safety rail — attached only when `enable_skill=True`, loads the built-in `SKILL.md` and appends `RobotControlTool`.
+> `SkillUseRail` comes from openjiuwen (re-exported by `agent/abstractions.py`), not a safety rail — `agent/builder.py` attaches it only when `enable_skill=True`; it loads the built-in `SKILL.md` and appends `RobotControlTool`.
 > `TraceRail` (`agent/trace.py`), the parallel observation rail, described in the overview.
 > `DiagnosisRail` (`rails/diagnosis.py`), depends on `TraceRail`, injects diagnosis evidence into the next model call after failure — see [Use the Trace Feedback Loop](../how-to/use-trace-feedback.md).
 
@@ -292,15 +295,16 @@ Data flow:
 Camera frame (RGB + depth)
    │
    ▼
-scene3d.locate_for_grasp / analyze_scene
-   │   detection → best mask + centroid (u,v) + median depth
+adapter grab_calibrated_frame → CameraFrame (RGB/depth/intrinsics/T_base_cam)
+   │
    ▼
-adapter _project_pixel_to_base_raw (one step, eye-in-hand / eye-to-hand)
+scene3d.locate_for_grasp / locate_for_place / analyze_scene
+   │   detection → masked point cloud → object/surface 3-D geometry
    ▼
-apply_xy_correction / build_grasp_result  (shared geometry: xy/z correction + grasp/place height)
-   ▼
-{position, grasp_position, place_position, ...}
+{center_mm, surface_z_mm, face_normal, ...}
 ```
+
+The low-level `pixel_to_base_xyz` is a separate explicit action that projects one `(u, v, depth_m)` sample into base-frame XYZ; it is not an implicit seam inside `scene3d`.
 
 `api/defaults`' `locate_for_grasp`/`locate_for_place`/`analyze_scene` forward to `perception/scene3d`; `search_target`/`approach_for_grasp`/`approach_for_place` forward to `motion/approach` — **the same one implementation path as every other action** (there is no second channel).
 
@@ -326,16 +330,18 @@ build_xxx_session = make_builder(
 
 ## 12. How cheap is new-hardware integration
 
-The answer is **6 files + 1 YAML**, most of them filled in from a template:
+The answer is **6 required Python files + 1 YAML** (plus one optional calibration wrapper), most of them filled in from a template:
 
 | File you write | What you actually do | Template-generatable? |
 |---|---|---|
+| `__init__.py` | Rename and export the `build_<body>_session` package entry point | ✅ replace placeholders |
 | `config_template.yaml` | Fill in hardware parameters (CAN port, jaw travel, Z floor, …) | ✅ guided by annotated comments |
 | `config.py` | `@dataclass` + `from_yaml()`/`from_dict()` | ✅ template gives it |
 | `lowlevel.py` | Driver: translate serial/CAN/Socket into `move_to_pose_blocking(pose, ...)` and friends | ⚠️ the only place real hardware logic lives |
 | `env.py` | `BaseRobotEnv` subclass: declare `capabilities` + expose safety/geometry properties and body constants | ✅ template gives it |
 | `api.py` | `@implements(SPEC)` bindings per action; forward to `defaults` when there is no geometry difference, write the body when there is | ✅ most methods need no hand-writing |
 | `session.py` | `make_builder(...)` one-liner | ✅ one line |
+| `calibration.py` (optional) | Hand-eye wrapper exposing `CALIBRATION_ADAPTER_SPEC`; copy it to `jiuwensymbiosis/calibration/adapters/<body>.py` | ✅ only for bodies that support calibration |
 
 The point: **most methods in `api.py` need no implementation of your own** — `defaults` delegates high-level actions like `goto_xyzr` to `self.env.<verb>()`. Only when the body geometry departs from the standard assumption do you override (e.g. Piper's tilted tool, tip ≠ flange, so it overrides `goto_xyzr` for the tip→flange conversion).
 
@@ -354,11 +360,13 @@ python scripts/smoke_test_adapter.py --module jiuwensymbiosis.adapters.my_robot 
 2. **Fill the YAML** `config_template.yaml` (CAN port, jaw travel, Z floor, workspace bounds, …)
 3. **Write `lowlevel.py`** — the only hardware logic: translate the vendor SDK into `move_to_pose_blocking(pose, ...)` / `set_gripper` / `grab_frames` and friends
 4. **Write `env.py`** — declare the `capabilities` frozenset, expose safety/geometry properties and body constants
-5. **Write `api.py`** — `@implements(SPEC)` bindings per action; write a method body only for geometry differences; vision needs just the projection function `_project_pixel_to_base_raw` (the flow is shared by `scene3d`/`approach`)
+5. **Write `api.py`** — `@implements(SPEC)` bindings per action; write a method body only for geometry differences; bind `pixel_to_base_xyz` explicitly and provide the camera/calibration hooks required by shared `scene3d`/`approach` flows
 6. **Write `session.py`** — `make_builder(...)` one-liner
-7. **Static validation** `python scripts/validate_adapter.py --module jiuwensymbiosis.adapters.acme`
-8. **Runtime smoke** `python scripts/smoke_test_adapter.py --module jiuwensymbiosis.adapters.acme`
-9. **Mock run** `python examples/run_task.py --config ... --mock` — validate the logic before hardware exists
+7. **Update `__init__.py`** — rename and export `build_acme_session`
+8. **Optionally add calibration** — copy the wrapper template into `jiuwensymbiosis/calibration/adapters/` and expose `CALIBRATION_ADAPTER_SPEC`
+9. **Static validation** `python scripts/validate_adapter.py --module jiuwensymbiosis.adapters.acme`
+10. **Runtime smoke** `python scripts/smoke_test_adapter.py --module jiuwensymbiosis.adapters.acme`
+11. **Mock run** `python examples/run_task.py --config ... --mock` — validate the logic before hardware exists
 
 **The framework core (agent/api/env/tools/rails) changes nowhere.** This is the leverage of the shared-action-vocabulary architecture: "form differences" collapse entirely into the adapter directory; "common capabilities" sediment into composable action contracts.
 
@@ -370,7 +378,7 @@ More detailed hardware porting steps are in [Port a Robot Hardware Adapter](../h
 
 | Design | Payoff |
 |---|---|
-| `ActionSpec` is the one contract of an action | 20 of 39 action names once carried 2–4 drifted copies; a single contract cannot drift |
+| `ActionSpec` is the one contract of an action | Before the refactor, 20 actions carried 2–4 drifted copies; a single contract cannot drift |
 | `ToolMeta` holds its spec rather than copying it | Contract fields exist in one place; what the planner reads cannot disagree with the vocabulary |
 | `@implements` binds each action | The adapter file is the body's capability list, replacing a base-class tuple |
 | `defaults` is a free function, not a base class | Taking one action never drags in its neighbours; the MRO stays flat |
@@ -391,7 +399,7 @@ More detailed hardware porting steps are in [Port a Robot Hardware Adapter](../h
 
 ---
 
-**Conclusion**: JiuwenSymbiosis collapses the essential complexity of "robot-form diversity" into the adapter directory through **a shared action contract + capability gating + one hardware contract + plannable pre-conditions/effects**. For a developer, the cost of adding a new body is compressed to **1 YAML + 1 driver file + 4 fill-in files**, while the agent, safety, tool, and perception layers are ready out of the box — as soon as the env declares a capability, the tools and safety policies are in place automatically. Across bodies, one task transfers between forms; on the same body, tasks compose dynamically. At runtime it is a **Perceive → Plan → Execute → Observe → Feedback** loop: `ExecutionMemory` keeps the world state fresh, the tracking/servo dual-rate loop lets critical grasp/place steps perceive while acting, and structured traces plus replay make every run reproducible and reviewable.
+**Conclusion**: JiuwenSymbiosis collapses the essential complexity of "robot-form diversity" into the adapter directory through **a shared action contract + capability gating + one hardware contract + plannable pre-conditions/effects**. For a developer, the cost of adding a new body is compressed to **1 YAML + 1 driver file + 5 fill-in files, plus an optional calibration wrapper**, while the agent, safety, tool, and perception layers are ready out of the box — as soon as the env declares a capability, the tools and safety policies are in place automatically. Across bodies, one task transfers between forms; on the same body, tasks compose dynamically. At runtime it is a **Perceive → Plan → Execute → Observe → Feedback** loop: `ExecutionMemory` keeps the world state fresh, the tracking/servo dual-rate loop lets critical grasp/place steps perceive while acting, and structured traces plus replay make every run reproducible and reviewable.
 
 ---
 

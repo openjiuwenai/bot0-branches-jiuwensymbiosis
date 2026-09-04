@@ -4,38 +4,44 @@
 
 For your first adapter read [Build Your First Robot Adapter](../tutorial/02-build-first-adapter.md); for bringing a vendor SDK and real hardware in from a Mock, read [Port a Robot Hardware Adapter](../how-to/port-hardware-adapter.md). This page is not a sequential procedure.
 
-## 1. The six adapter files
+## 1. Adapter files
 
 ```text
 jiuwensymbiosis/adapters/<name>/
+├── __init__.py
 ├── config.py
 ├── lowlevel.py
 ├── env.py
 ├── api.py
 ├── session.py
 └── config_template.yaml
+
+# Optional hand-eye calibration wrapper (copy template calibration.py here)
+jiuwensymbiosis/calibration/adapters/<name>.py
 ```
 
 | File | Stable responsibility | Must not contain |
 |---|---|---|
+| `__init__.py` | Export the renamed Session builder as the adapter package entry point | Hardware or business implementations |
 | `config.py` | Config dataclass, `from_dict()`, `from_yaml()` | Hardware connection and task text |
 | `lowlevel.py` | Vendor SDK, CAN, serial, socket, camera and actuator I/O | Agent, Rail, `@implements` |
 | `env.py` | Capabilities, lifecycle, observation, safety properties, driver wrapping | Prompts and vendor workflow orchestration |
-| `api.py` | `@implements(SPEC)` bindings, body geometry, raw vision projection | Duplicated detection/correction pipelines |
+| `api.py` | `@implements(SPEC)` bindings, body geometry, camera/calibration/detector hooks | Duplicated detection/correction pipelines |
 | `session.py` | Config/Env/Api, sidecar and extra-object wiring | Large business implementations |
 | `config_template.yaml` | Deployable starting point with annotated fields | User tasks and secrets |
+| `calibration.py` (optional) | Hand-eye wrapper exposing `CALIBRATION_ADAPTER_SPEC` | Calibration solving/quality logic (owned by the calibration subsystem) |
 
 Template lives in `templates/xxx_adapter/`.
 
 ## 2. Action vocabulary, capabilities, and tools
 
-What an action **is** is defined by the shared vocabulary in `jiuwensymbiosis/api/actions.py` as `ActionSpec`; the capability vocabulary is `jiuwensymbiosis.env.base.KNOWN_CAPABILITIES`. Each `ActionSpec` declares: name, description, capability gate, parameter names, result shape, pre-conditions and effects, location freshness, and whether it is visible to the planner.
+The `ActionSpec` contract class is defined in `api/decorators.py`, while shared vocabulary instances live in `jiuwensymbiosis/api/actions.py`; the capability vocabulary is `jiuwensymbiosis.env.base.KNOWN_CAPABILITIES`. Each `ActionSpec` declares: name, description, capability gate, parameter names, result shape, pre-conditions and effects (including `opens_access`/`closes_access`), location freshness, and whether it is visible to the planner.
 
 | Capability | Actions (`ActionSpec`) |
 |---|---|
 | `motion.cartesian` | `goto_xyzr`, `goto_pose`, `move_direction`, `get_pose`, `get_home_pose` |
 | `motion.joint` | `move_joint`, `move_named_joint`, `get_joint_positions` |
-| `motion.servo` | (no standalone public action; reachable via `robot_control`) |
+| `motion.servo` | (no standalone public action; fast-path `track_detect`/`track_grasp` ops drive `api.servo_to_tip`/`env.servo_to_flange`) |
 | `motion.base` | `navigate_relative`, `rotate_base`, `drive_arc` |
 | `motion.base_servo` | (continuous base-drive primitive) |
 | `motion.lift` | `set_lift_pose`, `lift_to_clearance` |
@@ -73,6 +79,7 @@ Protocols are defined in `jiuwensymbiosis/env/protocol.py`, **sliced by capabili
 | `SuctionDriver` | `grasp.suction` | `suction_state`, `suction_di_last`, `set_suction(on)` |
 | `GripperDriver` | `grasp.parallel` | `set_gripper(on)`, `gripper_state` |
 | `VisionDriver` | eye-in-hand `vision.detection` | `tf_flange_cam`, `calibration` |
+| `HandGuidingDriver` (optional) | Manual pose teaching | `hand_guiding(*, include_end_effector=False)` context manager; synchronize targets before restoring torque, raising `HandGuidingRecoveryError` on recovery failure |
 
 Key semantics:
 
@@ -84,7 +91,7 @@ Key semantics:
 - `grab_frames()` returns aligned `(rgb_uint8, depth_m_float32)` or `None`;
 - `close()` must be idempotent.
 
-The named `VisionDriver` Protocol currently covers only eye-in-hand calibration. Eye-to-hand adapters such as SO-101 and Cruzr expose `tf_base_cam` and `calibration` through body-specific structured interfaces and declare the `vision.eye_to_hand` marker; there is no standalone named eye-to-hand Protocol yet.
+The named `VisionDriver` Protocol currently covers only eye-in-hand calibration. Eye-to-hand adapters such as SO-101 expose `tf_base_cam` and `calibration` through body-specific structured interfaces and declare the `vision.eye_to_hand` marker; there is no standalone named eye-to-hand Protocol yet.
 
 A multi-capability driver may define a composite Protocol to tighten `low_level`'s type; `PiperFullDriver` is `CartesianDriver + JointDriver + CameraDriver + GripperDriver + VisionDriver`.
 
@@ -124,6 +131,7 @@ Env properties:
 | `base_step_limits` | `None` | SafetyRail, `(max|translation|m, max|turn|rad)` per base command |
 | `lift_limits` | `None` | SafetyRail, `set_lifter` soft limits |
 | `waist_step_limit_rad` | `None` | SafetyRail, `turn_waist` per-command cap |
+| `holding_payload` | Not provided | RecoveryRail checks before homing so a carried payload is not dropped blindly |
 | `cameras` | `(None,)` | Perceivable cameras (best-first); `grab_calibrated_frame(camera)` |
 | `urdf_path`/`arm_chains`/`arm_joints` | `None` | Derive `planning.reachability`; joints each arm actuates |
 
@@ -152,7 +160,7 @@ The Api subclasses `BaseRobotApi` and binds each action with `@implements(SPEC)`
 
 `@implements` attaches a `ToolMeta` (spec + `input_params`, the call schema derived from this body's signature); a signature that cannot accept a parameter the spec promises raises `ContractViolation` at import time. Bring-up, calibration and debug views are **not** actions: leave them undecorated and drive them from `scripts/`.
 
-A visual adapter implements only `_project_pixel_to_base_raw(u, v, depth_m)`: eye-in-hand combines the live `T_base_flange @ T_flange_cam`, eye-to-hand uses a fixed `T_base_cam`. The RAW method must not apply correction. `locate_for_grasp`/`locate_for_place`/`analyze_scene` are already shared by `perception/scene3d` (forwarded by `api/defaults`); `search_target`/`approach_for_grasp`/`approach_for_place` are already shared by `motion/approach` — an adapter overrides only when it needs body-specific geometry.
+A visual adapter explicitly binds `pixel_to_base_xyz(u, v, depth_m)` with `@implements(PIXEL_TO_BASE_XYZ)`: eye-in-hand bodies may forward to `perception/vision.default_pixel_to_base_xyz` with a `pose_to_tf` callback (combining live `T_base_flange @ T_flange_cam` and applying calibration XY correction), while eye-to-hand bodies implement it with `T_base_cam`. `locate_for_grasp`/`locate_for_place`/`analyze_scene` are shared by `perception/scene3d` and consume a calibrated `CameraFrame` plus detector hook directly; `search_target`/`approach_for_grasp`/`approach_for_place` are shared by `motion/approach`. An adapter supplies camera/calibration/detector hooks and overrides only body-specific geometry.
 
 ## 6. Config and Session builder
 
@@ -209,8 +217,8 @@ The returned Builder supports `build(cfg)`, `.from_yaml(path)`, and `.from_dict(
 | `adapters/_common/safety.py` | `WorkspaceBounds`, `check_flange_z()` | TIP/FLANGE Z defence |
 | `perception/detector_client.py` | `init_detector()` | HTTP detector client |
 | `perception/detector_sidecar.py` | `detector_subprocess()` | Detector-service lifecycle |
-| `perception/scene3d.py` | `locate_for_grasp()`, `locate_for_place()`, `analyze_scene()` | detect→centroid/median-depth→raw projection→correction→geometry (3-D scene sensing) |
-| `perception/vision.py` | `detect_and_centroid()`, `apply_xy_correction()`, `build_grasp_result()` | shared detection/correction functions |
+| `perception/scene3d.py` | `locate_for_grasp()`, `locate_for_place()`, `analyze_scene()` | calibrated frame→detection→masked point cloud→object/surface geometry |
+| `perception/vision.py` | `detect_and_centroid()`, `apply_xy_correction()`, `default_pixel_to_base_xyz()`, `default_get_grasp_info_simple()` | shared detection/correction/eye-in-hand projection functions |
 | `perception/calibration.py` | `load_calibration()` | versioned hand-eye calibration loading |
 | `motion/approach.py` | `search_target()`, `approach_target_for_grasp()`, `approach_target_for_place()` | search → face the target → converge to a work pose (base approach) |
 | `motion/dual_arm.py` | `dual_arm_grasp()`, `dual_arm_place()` | two-arm coordinated grasp/place (with force confirmation) |
@@ -269,20 +277,19 @@ Do not add strings casually to dodge an unknown-capability error. A marker capab
 | Entry | Purpose |
 |---|---|
 | `scripts/validate_adapter.py --module ...` | Static check of directory, signatures, capability alignment, and Driver members |
-| `scripts/smoke_test_adapter.py --module ...` | Connect a Mock Env, invoke every generated tool, check serializable results |
+| `scripts/smoke_test_adapter.py --module ...` | Inject a stub driver into the Env (no real hardware connection), invoke every generated tool, check serializable results |
 | `tests/unit_tests/env/` | Env, capability, and safety-property reference tests |
 | `tests/unit_tests/api/` | action vocabulary, `@implements`, and capability derivation |
 | `tests/unit_tests/agent/` | Session, Builder, Rails, and tool assembly |
 | `tests/mocks/` | Mock Driver, Env, Api, and scenes |
 
-Common validation outcomes:
+Common validation outcomes (the validator prints numbered Chinese messages; these are semantic summaries):
 
 | Symptom | Meaning |
 |---|---|
-| unknown capability | Env string not in the vocabulary |
-| Api capability missing from Env | tool filtered by the capability intersection |
-| Driver member missing | declared capability disagrees with a Driver Protocol |
-| tool result not serializable | tool returned an ndarray, Pose, or other native object |
+| Unknown capability (for example E-04) | Env string not in the vocabulary |
+| Api capability missing from `Env.capabilities` (A-08) | Tool filtered by the capability intersection |
+| Driver missing members required by a capability (for example D-14) | Declared capability disagrees with a Driver Protocol |
 
 ## 10. Built-in adapter implementation locations
 
@@ -291,7 +298,7 @@ Common validation outcomes:
 | Capabilities & Env | `adapters/piper/env.py` | `adapters/so101/env.py` | `adapters/cruzr/env.py` |
 | Vendor driver | `adapters/piper/lowlevel.py` | `adapters/so101/lowlevel.py` | `adapters/cruzr/lowlevel.py` |
 | Geometry | `adapters/piper/geometry.py` | `adapters/so101/geometry.py` | `adapters/cruzr/geometry.py` |
-| Calibration | `adapters/piper/_calibration.py` | (in-model calibration/registry) | `adapters/cruzr/_calibration.py` |
+| Calibration | `adapters/piper/_calibration.py` + `calibration/adapters/piper.py` | `adapters/so101/_calibration.py` + `calibration/adapters/so101.py` | `adapters/cruzr/_calibration.py` (camera calibration loading only) |
 | Api | `adapters/piper/api.py` | `adapters/so101/api.py` | `adapters/cruzr/api.py` |
 | Config | `adapters/piper/config.py` | `adapters/so101/config.py` | `adapters/cruzr/config.py` |
 | Session | `adapters/piper/session.py` | `adapters/so101/session.py` | `adapters/cruzr/session.py` |
