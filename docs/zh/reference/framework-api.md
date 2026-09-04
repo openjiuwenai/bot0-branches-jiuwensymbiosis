@@ -48,10 +48,10 @@ ModelSpec(
 | 模型 | `model=None`、`model_spec=None`、`system_prompt=None` |
 | Rails | `enable_visual_feedback=True`、`enable_safety=True`、`enable_recovery=True`、`enable_skill=False` |
 | 扩展 | `extra_tools=None`、`extra_rails=None`、`workspace=None`、`strict_capabilities=False` |
-| Trace | `enable_tracing=False`、`trace_max_entries=200`、`trace_max_frames=50`、`trace_save_frames=False`、`trace_console=False`、`trace_dir=None` |
-| Diagnosis | `enable_diagnosis=False`、`diagnosis_max_chars=1500`、`diagnosis_history_steps=3` |
-| 日志 | `log_level="INFO"`、`log_dir="./logs"` |
-| Fast path | `exec_mode="fastagent"`、`exec_config=None` |
+| Trace | `enable_tracing=False`、`trace_max_entries=200`、`trace_max_frames=50`、`trace_save_frames=False`、`trace_console=False`、`trace_dir=None`、`trace_capture_loggers=["jiuwensymbiosis"]` |
+| Diagnosis | `enable_diagnosis=False`、`diagnosis_max_chars=1500`、`diagnosis_history_steps=3`、`diagnosis_history_kinds=("reject", "recover")` |
+| 日志 | `log_level="INFO"`、`log_dir="./logs"`、`motion_log_dir=None`（→ `"./jiuwen_motion_log"`，每 run 的 `commands.log`/`grasp_debug/` 根目录） |
+| Fast path | `exec_mode="fastagent"`、`exec_config=None`、`enable_fast_special_ops=True`（授权实时伺服 op `track_grasp`/`track_detect`） |
 
 `RobotAgentConfig.from_dict(data)` 从 YAML 的 `agent:` 映射构造配置；未知字段会触发 `TypeError`。
 
@@ -96,6 +96,7 @@ run_robot_task(
     config=None,
     *,
     conversation_id=None,
+    cancel_token=None,
 ) -> Any
 
 run_fast_task(
@@ -104,6 +105,7 @@ run_fast_task(
     config,
     *,
     conversation_id=None,
+    cancel_token=None,
 ) -> dict
 ```
 
@@ -111,3 +113,4 @@ run_fast_task(
 - `build_robot_agent_config` 返回用于多机器人顶层 Agent 的 `SubAgentConfig`。
 - `run_robot_task` 根据 `config.exec_mode` 选择普通 Agent 或 fast path。
 - `run_fast_task` 要求显式传入配置；无法构建 fast path 时返回带 `ok=False` 的结果字典。
+- `cancel_token` 是可选的取消令牌（GUI 强停等场景用）；两个运行函数均接受。

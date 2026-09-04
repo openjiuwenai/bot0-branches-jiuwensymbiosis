@@ -3,7 +3,7 @@
 > Category: How-to. This guide turns an already working mock adapter into production hardware integration.
 
 If this is your first adapter, complete [Build Your First Robot Adapter](../tutorial/02-build-first-adapter.md) first.
-This guide does not repeat the complete six-file example. Use the
+This guide does not repeat the complete "6 required Python files + 1 YAML, plus an optional calibration wrapper" example. Use the
 [Robot Adapter Reference](../reference/adapter-reference.md) for exact Capability, Protocol, Env, `@implements`, and
 `make_builder()` contracts.
 
@@ -192,10 +192,11 @@ def goto_xyzr(self, x: float, y: float, z: float, r: float | None = None) -> Non
 
 This scalar example applies only when the tool extends along base Z. Use a full transform for a tilted mount.
 
-A visual adapter implements only `_project_pixel_to_base_raw()`. Eye-to-hand example:
+A visual adapter binds the `pixel_to_base_xyz()` projection action with `@implements(PIXEL_TO_BASE_XYZ)`. Eye-to-hand example:
 
 ```python
-def _project_pixel_to_base_raw(self, u: float, v: float, depth_m: float) -> np.ndarray:
+@implements(PIXEL_TO_BASE_XYZ)
+def pixel_to_base_xyz(self, u: float, v: float, depth_m: float) -> dict:
     driver = self.env.low_level
     if driver is None:
         raise RuntimeError("env not connected")
@@ -207,14 +208,16 @@ def _project_pixel_to_base_raw(self, u: float, v: float, depth_m: float) -> np.n
     if intrinsics is None or tf_base_cam is None:
         raise RuntimeError("eye-to-hand calibration unavailable")
     p_cam = pixel_and_depth_to_camera_xyz((u, v), depth_m, intrinsics)
-    return apply_transform(tf_base_cam, p_cam)
+    xyz = apply_transform(tf_base_cam, p_cam)
+    return {"x": float(xyz[0]), "y": float(xyz[1]), "z": float(xyz[2])}
 ```
 
-Eye-in-hand composes the live flange pose as `T_base_cam = T_base_flange(live) @ T_flange_cam`. The raw seam performs
-only the coordinate transform; it must not apply XY or Z correction. `perception/scene3d` owns detection, centroid and
-depth, correction, and grasp/place heights exactly once. `get_image()`, `get_grasp_info_simple()`, and
-`pixel_to_base_xyz()` are forwarded by `api/defaults` to shared implementations. Override `analyze_scene()` only when the
-adapter needs body-specific semantics.
+Eye-in-hand bodies may forward this action to `perception/vision.default_pixel_to_base_xyz()` with a `pose_to_tf`
+callback; the shared implementation composes live `T_base_flange @ T_flange_cam` and applies calibration XY correction.
+`get_image()` may forward through `api.defaults`, while `pixel_to_base_xyz()` and `get_grasp_info_simple()` remain
+explicit `@implements` actions whose eye-in-hand implementations can reuse `perception/vision`. Higher-level
+`locate_for_grasp()`, `locate_for_place()`, and `analyze_scene()` consume calibrated frames and detector hooks through
+`perception/scene3d`; override them only for body-specific semantics.
 
 ## 4. Integrate detection, calibration, and correction
 

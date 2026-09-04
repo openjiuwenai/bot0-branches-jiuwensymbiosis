@@ -17,6 +17,7 @@
 │  Safety Rails     │  SafetyRail                  │  运动前边界拦截
 │                   │  RecoveryRail                │  异常自动回零
 │                   │  VisualFeedbackRail          │  动作后视觉验证
+│                   │  DiagnosisRail / TraceRail   │  可选诊断与执行追踪
 ├──────────────────────────────────────────────────┤
 │  Tool Layer       │  build_robot_tools(api)      │  每个 @implements → 一个 LLM 工具
 │                   │  RobotControlTool(api)       │  单一入口 action/params 分发
@@ -33,7 +34,7 @@
 ├──────────────────────────────────────────────────┤
 │  Env Layer        │  BaseRobotEnv                │  硬件契约面（唯一）
 │  (Hardware        │  connect/disconnect/observe  │  能力声明 (env.capabilities)
-│   Abstraction)    │  home/move_to_flange/...     │  运动/末端动词（默认委托驱动）
+│   Abstraction)    │  move_to_flange/set_end_...  │  默认委托驱动；home 由本体实现
 │                   │  home_pose/tool_offset_mm    │  机器人常量属性
 │                   │  grab_rgb()                  │  单帧图像（默认走 get_observation）
 │                   │  z_min_safe/workspace_bounds │  安全契约属性
@@ -59,12 +60,12 @@
 | 概念 | 定义 | 谁定义 |
 |------|------|--------|
 | **Capability** | 硬件能力的命名字符串，如 `"motion.cartesian"` | `env/base.py:KNOWN_CAPABILITIES` |
-| **ActionSpec** | 一个动作的契约：名称/描述/能力门/参数/结果形状/前置条件与效果/位置新鲜度 | `api/actions.py` |
+| **ActionSpec** | 一个动作的契约：名称/描述/能力门/参数/结果形状/前置条件与效果/位置新鲜度 | 类定义在 `api/decorators.py`，词表实例在 `api/actions.py` |
 | **Env** | 硬件驱动包装器，实现 `connect/disconnect/get_observation` | 适配器开发者 |
-| **Api** | 继承 `BaseRobotApi`，用 `@implements(SPEC)` 绑定每条动作；无差异的转发 `api/defaults`，有几何差异的写方法体；视觉适配器实现 RAW 投影接缝 | 适配器开发者 |
+| **Api** | 继承 `BaseRobotApi`，用 `@implements(SPEC)` 绑定每条动作；无差异的转发 `api/defaults`，有几何或相机差异的显式实现 | 适配器开发者 |
 | **Config** | hardware 参数的 dataclass，含 `from_yaml/from_dict` | 适配器开发者 |
 | **Session** | 将 Env + Api + 子进程 打包为生命周期单元 | `make_builder()` 自动生成 |
-| **Sidecar** | 随 Session 启停的子进程（如视觉检测服务器） | `_common/detector_sidecar.py` |
+| **Sidecar** | 随 Session 启停的子进程（如视觉检测服务器） | `perception/detector_sidecar.py`（`_common/builder.py` 提供组装封装） |
 
 ### 约定
 
@@ -80,12 +81,14 @@
 # 1. 复制模板
 cp -r templates/xxx_adapter/ jiuwensymbiosis/adapters/my_robot/
 
-# 2. 修改文件
+# 2. 修改文件，并把所有 Xxx/xxx/build_xxx_session 占位符替换为机器人名称
 #  - config.py: 填写硬件连接参数
 #  - lowlevel.py: 实现硬件通信（或先写 Mock）
 #  - env.py: 声明 capabilities + connect/disconnect/observe
 #  - api.py: @implements(SPEC) 绑定每条动作；无差异的转发 defaults，有专属几何的写方法体
-#  - session.py: 无需修改（make_builder 已封装；声明式 api_kwargs_from_cfg + make_detector_sidecar）
+#  - session.py: 保留声明式 make_builder 接线，但必须重命名类和 build_xxx_session
+#  - __init__.py: 同步重命名导出的 build_xxx_session
+#  - config_template.yaml: 复制到 configs/my_robot/default.yaml 后填写
 
 # 3. 验证（静态结构 + 运行时冒烟）
 python scripts/validate_adapter.py --module jiuwensymbiosis.adapters.my_robot
@@ -237,6 +240,8 @@ class ScaraEnv(BaseRobotEnv):
 
 ```python
 """SCARA Api — 4-DOF + 吸盘。goto_xyzr / 吸盘开关转发 api.defaults。"""
+from typing import Literal
+
 from jiuwensymbiosis.api import defaults
 from jiuwensymbiosis.api.actions import (
     ACTIVATE_SUCTION,
@@ -252,8 +257,17 @@ class ScaraApi(BaseRobotApi):
     """4-DOF SCARA + 吸盘末端。仅 get_pose/get_home_pose 有本体差异（'r' 字段命名）。"""
 
     @implements(GOTO_XYZR)
-    def goto_xyzr(self, x: float, y: float, z: float, r: float | None = None) -> None:
-        return defaults.goto_xyzr(self, x, y, z, r)
+    def goto_xyzr(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        r: float | None = None,
+        orientation_policy: Literal["top_down", "preserve"] = "top_down",
+    ) -> None:
+        return defaults.goto_xyzr(
+            self, x, y, z, r, orientation_policy=orientation_policy
+        )
 
     @implements(ACTIVATE_SUCTION)
     def activate_suction(self) -> dict:
@@ -302,4 +316,4 @@ python scripts/validate_adapter.py --module jiuwensymbiosis.adapters.my_scara
 python scripts/smoke_test_adapter.py --module jiuwensymbiosis.adapters.my_scara
 ```
 
-静态验证检查目录、签名和能力对齐；冒烟测试连接 Mock Env、调用生成工具并检查返回值可序列化。至此本教程目标已经完成。替换为真实驱动前，继续阅读[移植机器人硬件适配器](../how-to/port-hardware-adapter.md)中的厂商 SDK、坐标几何、工作空间、安全和真机验收要求。
+静态验证检查目录、签名和能力对齐；冒烟测试向 Env 注入桩驱动（不连接真实硬件）、调用生成工具并检查返回值可序列化。至此本教程目标已经完成。替换为真实驱动前，继续阅读[移植机器人硬件适配器](../how-to/port-hardware-adapter.md)中的厂商 SDK、坐标几何、工作空间、安全和真机验收要求。
