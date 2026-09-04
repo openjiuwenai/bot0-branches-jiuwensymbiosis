@@ -75,6 +75,9 @@ python -m pip install -e ".[piper]"
 # SO-101 / LeRobot (Python 3.12)
 python -m pip install -e ".[so101]"
 
+# Cruzr mobile dual-arm (Pinocchio arm IK; rclpy comes from the ROS workspace)
+python -m pip install -e ".[cruzr]"
+
 # ASR and audio capture
 python -m pip install -e ".[voice]"
 
@@ -85,7 +88,7 @@ python -m pip install -e ".[gui]"
 python -m pip install -e ".[calib]"
 ```
 
-Extras can be combined, for example `.[full,piper]` or `.[full,so101]`; commands containing `[full]` still require the
+Extras can be combined, for example `.[full,piper]`, `.[full,so101]`, or `.[full,cruzr]`; commands containing `[full]` still require the
 PyTorch CUDA 12.8 extra index shown above.
 
 ## 6. Install version-pinned runtime dependencies

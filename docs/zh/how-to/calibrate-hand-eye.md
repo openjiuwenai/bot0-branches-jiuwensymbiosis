@@ -229,8 +229,8 @@ calibration 是根项目内的独立边界：它拥有模型、求解、归档�
 不依赖 Agent/SafetyRail，代码位于 `jiuwensymbiosis/calibration/`。
 `jiuwensymbiosis.calibration.integration` 提供配置、RobotSession 生命周期、adapter
 标识和制品回读验证。标定执行操作者确认的受控轨迹，不自动修改轨迹、home 或挂接
-Agent Rail。可用 `make calib-test CONDA_ENV=` 和 `make calib-check CONDA_ENV=` 检查
-同一根分发中的标定模块。
+Agent Rail。标定模块测试位于 `tests/unit_tests/calibration/`，可用
+`pytest tests/unit_tests/calibration/` 运行。
 
 三个工作流可脱离 CLI 单独调用：`collect_waypoints(device, ...)`、
 `execute_calibration(device, archive, ...)` 和 `replay_calibration(archive, ...)`。
@@ -265,13 +265,13 @@ calibration:
 # 1) 同 session 手动示教收集 waypoint（SO-101 ManualGuidance）
 jiuwensymbiosis-calibrate-eye-to-hand \
     --config scripts/calibrate/so101_calibrate.yaml \
-    --board charuco --squares-x 5 --squares-y 7 --square-size-mm 15.28 --marker-size-mm 11 \
+    --board charuco --squares-x 5 --squares-y 7 --square-size-mm 20.86 --marker-size-mm 15.2 \
     --collect-poses tmp/so101_wp.npz
 
 # 2) 自动沿 waypoint 轨迹采集 + 求解 + 发布（live，必须有 --config）
 jiuwensymbiosis-calibrate-eye-to-hand \
     --config scripts/calibrate/so101_calibrate.yaml \
-    --board charuco --squares-x 5 --squares-y 7 --square-size-mm 15.28 --marker-size-mm 11 \
+    --board charuco --squares-x 5 --squares-y 7 --square-size-mm 20.86 --marker-size-mm 15.2 \
     --auto tmp/so101_wp.npz --n-stations 24 --confirm-estop \
     --out tmp/so101_eye_to_hand.json
 

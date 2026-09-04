@@ -9,7 +9,7 @@ jiuwensymbiosis-run --config configs/cruzr/cruzr.yaml --query "把箱子搬到�
 jiuwensymbiosis-run --config configs/piper/piper.yaml   --query "把瓶子放到左边"
 ```
 
-`--config` is required; the YAML's top-level `adapter:` field selects the robot from the registry (`--robot` overrides). Non-voice mode requires `--query` (the task is not in the config). Other common overrides:
+`--config` is required; the YAML's top-level `adapter:` field selects the robot (`--robot` overrides). Tasks normally come from `--query` (configs do not embed tasks, although the YAML retains an optional `env.cfg.prompt` fallback); startup fails when both are empty. Other common overrides:
 
 | Option | Effect |
 |---|---|
@@ -19,6 +19,7 @@ jiuwensymbiosis-run --config configs/piper/piper.yaml   --query "把瓶子放到
 | `--voice` / `--voice-text` / `--voice-audio-file` / `--voice-once` / `--no-wake` / `--tts` / `--asr-device` | Voice mode |
 | `--no-skill` | Disable SkillUseRail + the robot_control dispatcher |
 | `--mode` | `tool` / `code` / `hybrid` |
+| `--no-visual-feedback` | Disable VisualFeedbackRail |
 | `--server-url` / `--model` / `--api-key` | Override LLM endpoint/model/key |
 | `--max-iter` / `--workspace` / `--debug` | Iteration cap, workspace, log level |
 
@@ -55,12 +56,12 @@ Starts the NiceGUI browser UI listening on `127.0.0.1:8770`. When a dependency i
 Installing `.[calib]` provides three entry points:
 
 ```bash
-jiuwensymbiosis-calibrate-hand-eye --collect-poses OUTPUT --config RUNTIME_YAML
+jiuwensymbiosis-calibrate-hand-eye --collect-poses OUTPUT --config RUNTIME_YAML [--import-poses INPUT]
 jiuwensymbiosis-calibrate-hand-eye --auto WAYPOINT_ARCHIVE --config RUNTIME_YAML --confirm-estop
 jiuwensymbiosis-calibrate-hand-eye --replay STATION_ARCHIVE [--config RUNTIME_YAML]
 ```
 
-`jiuwensymbiosis-calibrate-hand-eye` is the mount-neutral entry point; the camera mount comes from the runtime config or the archive and cannot be overridden on the command line. `jiuwensymbiosis-calibrate-eye-to-hand` runs the same flow but requires `eye_to_hand`, and `jiuwensymbiosis-calibrate-eye-in-hand` requires `eye_in_hand` for archive modes.
+`jiuwensymbiosis-calibrate-hand-eye` is the mount-neutral entry point; the camera mount comes from the runtime config or archive and cannot be overridden on the command line. `--collect-poses --import-poses INPUT` connects to no hardware and only normalizes a self-describing waypoint archive into OUTPUT. `jiuwensymbiosis-calibrate-eye-to-hand` runs the same flow but requires `eye_to_hand`. `jiuwensymbiosis-calibrate-eye-in-hand` requires `eye_in_hand` for archive modes (`--collect-poses`, `--replay`, or parameterized `--auto`); other invocations use the legacy Piper wizard and print a compatibility warning.
 
 Exit codes: `0` published (or dry-run passed), `1` execution error, `2` preflight contract failure, `3` only an unloadable REVIEW/candidate report was produced.
 

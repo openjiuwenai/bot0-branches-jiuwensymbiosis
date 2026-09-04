@@ -9,6 +9,9 @@ show a stable directional offset.
 The Piper workflow uses [calibrate_hand_eye.py](../../../scripts/calibrate/calibrate_hand_eye.py) and writes
 `configs/piper/piper_calib.json`.
 
+The body-agnostic calibration subsystem lives under `jiuwensymbiosis/calibration/` and remains independent of Agent
+Rails. Run its tests with `pytest tests/unit_tests/calibration/` (the Makefile has no calibration-specific target).
+
 ## Contents
 
 Prepare the camera, board, and robot; collect diverse poses; solve and assess the transform; then verify it before use.

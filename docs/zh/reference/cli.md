@@ -9,7 +9,7 @@ jiuwensymbiosis-run --config configs/cruzr/cruzr.yaml --query "把箱子搬到�
 jiuwensymbiosis-run --config configs/piper/piper.yaml   --query "把瓶子放到左边"
 ```
 
-`--config` 必填；YAML 顶层 `adapter:` 字段从注册表选中机器人（`--robot` 覆盖）。非语音模式必须提供 `--query`（任务不在 config 里）。其他常用覆盖项：
+`--config` 必填；YAML 顶层 `adapter:` 字段从注册表选中机器人（`--robot` 覆盖）。任务默认由 `--query` 给出（config 不内置任务；YAML 保留了可选的 `env.cfg.prompt` 回退），两者皆空时启动报错。其他常用覆盖项：
 
 | 选项 | 作用 |
 |---|---|
@@ -19,6 +19,7 @@ jiuwensymbiosis-run --config configs/piper/piper.yaml   --query "把瓶子放到
 | `--voice` / `--voice-text` / `--voice-audio-file` / `--voice-once` / `--no-wake` / `--tts` / `--asr-device` | 语音模式 |
 | `--no-skill` | 关闭 SkillUseRail + robot_control 分派器 |
 | `--mode` | `tool` / `code` / `hybrid` |
+| `--no-visual-feedback` | 关闭 VisualFeedbackRail |
 | `--server-url` / `--model` / `--api-key` | 覆盖 LLM 端点/模型/key |
 | `--max-iter` / `--workspace` / `--debug` | 迭代上限、工作区、日志级别 |
 
@@ -55,12 +56,12 @@ python -m jiuwensymbiosis.gui
 安装 `.[calib]` 后提供三个入口：
 
 ```bash
-jiuwensymbiosis-calibrate-hand-eye --collect-poses OUTPUT --config RUNTIME_YAML
+jiuwensymbiosis-calibrate-hand-eye --collect-poses OUTPUT --config RUNTIME_YAML [--import-poses INPUT]
 jiuwensymbiosis-calibrate-hand-eye --auto WAYPOINT_ARCHIVE --config RUNTIME_YAML --confirm-estop
 jiuwensymbiosis-calibrate-hand-eye --replay STATION_ARCHIVE [--config RUNTIME_YAML]
 ```
 
-`jiuwensymbiosis-calibrate-hand-eye` 是 mount-neutral 统一入口；相机安装方式来自运行时配置或 archive，不能由命令行覆盖。`jiuwensymbiosis-calibrate-eye-to-hand` 使用相同流程并强制要求 `eye_to_hand`，`jiuwensymbiosis-calibrate-eye-in-hand` 对 archive 模式强制要求 `eye_in_hand`。
+`jiuwensymbiosis-calibrate-hand-eye` 是 mount-neutral 统一入口；相机安装方式来自运行时配置或 archive，不能由命令行覆盖。`--collect-poses --import-poses INPUT` 不连硬件，只把自描述 waypoint archive 规范化到 OUTPUT。`jiuwensymbiosis-calibrate-eye-to-hand` 使用相同流程并强制要求 `eye_to_hand`；`jiuwensymbiosis-calibrate-eye-in-hand` 对 archive 模式（`--collect-poses`/`--replay`/带参 `--auto`）强制要求 `eye_in_hand`，其余调用走 legacy Piper 向导并打印兼容提示。
 
 退出码：`0` 成功或 dry-run 通过，`1` 执行错误，`2` preflight 契约失败，`3` 只生成不可加载的 REVIEW/candidate 报告。
 

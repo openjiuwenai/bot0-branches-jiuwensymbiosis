@@ -62,10 +62,10 @@ SO-101 适配器要求 Python 3.12。建议在项目环境中一次安装标定�
 python -m pip install -e ".[calib,so101]"
 ```
 
-如需运行严格的标定测试：
+如需运行标定模块测试：
 
 ```bash
-make calib-test-strict
+pytest tests/unit_tests/calibration/
 ```
 
 ---
@@ -406,7 +406,7 @@ jiuwensymbiosis-calibrate-eye-to-hand \
 jiuwensymbiosis-calibrate-eye-to-hand \
   --config "$CALIB_CONFIG" \
   --board charuco --squares-x 5 --squares-y 7 \
-  --square-size-mm 15.28 --marker-size-mm 11.0 \
+  --square-size-mm 20.86 --marker-size-mm 15.2 \
   --auto tmp/so101_wp.npz --n-stations 20 \
   --confirm-estop --cross-check \
   --out tmp/so101_eye_to_hand.json

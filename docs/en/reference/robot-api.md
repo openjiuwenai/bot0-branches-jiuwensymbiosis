@@ -41,7 +41,7 @@ home() -> None
 
 The `capabilities` property is **derived from the specs of the actions a body implements** (each `@implements` contributes its `ActionSpec`'s capability), plus any declared marker-capability class attribute (`motion.servo`, `planning.reachability` — which have no corresponding action). **Implementing an action automatically grants its capability**, and never advertises a capability the body has not got.
 
-The action vocabulary is in `jiuwensymbiosis/api/actions.py`. Each action declares its description, capability gate, parameter names, result shape, `requires`/`provides`/`invalidates`, `produces_location`/`consumes_location`/`invalidates_locations`, and `planner_visible`. Generic implementations (one line of delegation to an Env verb) live in `api/defaults.py`, which an adapter takes as needed.
+The action vocabulary is in `jiuwensymbiosis/api/actions.py`. Each action declares its description, capability gate, parameter names, result shape, `requires`/`provides`/`invalidates`, `opens_access`/`closes_access`, `produces_location`/`consumes_location`/`invalidates_locations`, and `planner_visible`. Generic implementations (one line of delegation to an Env verb) live in `api/defaults.py`, which an adapter takes as needed.
 
 ## Known capabilities
 
@@ -86,6 +86,7 @@ Each `ActionSpec` additionally carries a planning contract that the two-tier pla
 
 - `result` — JSON Schema of result fields, auto-derived from a `TypedDict` (or a union); the authoritative source is `jiuwensymbiosis/contracts.py` (owned by no layer), with success/failure shapes merged
 - `requires`/`provides`/`invalidates` — robot self-state, over `api/state.py:KNOWN_STATE_TOKENS` (`payload.held`/`payload.clear`/`payload.stowed`/`body.home`)
+- `opens_access`/`closes_access` — barrier open/close effects, consumed by `parse_sequence`
 - `produces_location`/`consumes_location`/`invalidates_locations` — location freshness (an action that senses where something is *produces*; one that moves the base *invalidates* every prior location)
 
 A contract never encodes an order; `parse_sequence` rejects only permutations whose pre-conditions do not hold. `WorldState.snapshot(session)` reports the same vocabulary at runtime (observation overrides belief; an absent token is unknown, never false).
@@ -93,11 +94,11 @@ A contract never encodes an order; `parse_sequence` rejects only permutations wh
 ## Tool generation
 
 ```python
-build_robot_tools(api, *, env=None, allow=None, deny=None) -> list[Any]
+build_robot_tools(api, *, env=None, allow=None, deny=None, planner_only=False) -> list[Any]
 list_tool_meta(api, *, env=None) -> list[dict]
 ```
 
-When an Env is supplied, generated tools are gated by `api.capabilities ∩ env.capabilities`. `allow` and `deny` filter by tool name. The capability comes from the action's own `ActionSpec`, never from whichever class declares the method.
+When an Env is supplied, generated tools are gated by `api.capabilities ∩ env.capabilities`. `allow` and `deny` filter by tool name. `planner_only=True` emits only shared-vocabulary actions whose specs are `planner_visible`; both agent paths use this setting. The capability comes from the action's own `ActionSpec`, never from whichever class declares the method.
 
 ## Aggregated and code tools
 

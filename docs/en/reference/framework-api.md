@@ -51,10 +51,10 @@ ModelSpec(
 | Model | `model=None`, `model_spec=None`, `system_prompt=None` |
 | Rails | `enable_visual_feedback=True`, `enable_safety=True`, `enable_recovery=True`, `enable_skill=False` |
 | Extension | `extra_tools=None`, `extra_rails=None`, `workspace=None`, `strict_capabilities=False` |
-| Trace | `enable_tracing=False`, `trace_max_entries=200`, `trace_max_frames=50`, `trace_save_frames=False`, `trace_console=False`, `trace_dir=None` |
-| Diagnosis | `enable_diagnosis=False`, `diagnosis_max_chars=1500`, `diagnosis_history_steps=3` |
-| Logging | `log_level="INFO"`, `log_dir="./logs"` |
-| Fast path | `exec_mode="fastagent"`, `exec_config=None` |
+| Trace | `enable_tracing=False`, `trace_max_entries=200`, `trace_max_frames=50`, `trace_save_frames=False`, `trace_console=False`, `trace_dir=None`, `trace_capture_loggers=["jiuwensymbiosis"]` |
+| Diagnosis | `enable_diagnosis=False`, `diagnosis_max_chars=1500`, `diagnosis_history_steps=3`, `diagnosis_history_kinds=("reject", "recover")` |
+| Logging | `log_level="INFO"`, `log_dir="./logs"`, `motion_log_dir=None` (resolves to `./jiuwen_motion_log`, the root for each run's `commands.log`/`grasp_debug/`) |
+| Fast path | `exec_mode="fastagent"`, `exec_config=None`, `enable_fast_special_ops=True` (authorizes real-time `track_grasp`/`track_detect` servo ops) |
 
 `RobotAgentConfig.from_dict(data)` consumes the YAML `agent:` mapping. Unknown fields raise `TypeError`.
 `parallel_tool_calls=True` is rejected for motion/grasp hardware and cannot be combined with tracing.
@@ -119,6 +119,7 @@ run_robot_task(
     config=None,
     *,
     conversation_id=None,
+    cancel_token=None,
 ) -> Any
 
 run_fast_task(
@@ -127,6 +128,7 @@ run_fast_task(
     config,
     *,
     conversation_id=None,
+    cancel_token=None,
 ) -> dict
 ```
 
@@ -135,6 +137,7 @@ run_fast_task(
 - `run_robot_task` picks the ordinary Agent or the fast path according to `config.exec_mode`.
 - `run_fast_task` requires the configuration to be passed explicitly; when the fast path cannot be built it returns a
   result dictionary carrying `ok=False`.
+- Both execution functions accept an optional `cancel_token`, used by the GUI and other hard-cancel callers.
 
 The caller owns Session connection; use `with session:` to guarantee cleanup.
 

@@ -23,7 +23,7 @@
 | 会话入口 | `MockArmEnv` + Mock Api/Model | `build_piper_session` | `build_so101_session` | `build_cruzr_session` |
 | 笛卡尔运动 | ✅ 内存位姿 | ✅ XYZ/R + 完整 `goto_pose` | ✅ XYZ + 最佳努力姿态 IK | — |
 | 关节运动 | — | ✅ 六关节 | ✅ 五个机械臂关节 | ✅ 双臂（named joint，弧度） |
-| 实时伺服 | ✅ 仿真 sink | ✅ `servo_to_tip`/`servo_to_flange` | ✅ `servo_to_tip`/`servo_to_flange` | — |
+| 实时伺服 | ✅ 仿真 sink | ✅ `servo_to_tip`/`servo_to_flange`（fast path 伺服 op 驱动） | ✅ `servo_to_tip`/`servo_to_flange`（fast path 伺服 op 驱动） | — |
 | 移动底盘 | — | — | — | ✅ `navigate_relative`/`rotate_base`/`drive_arc`；连续 `base_servo` |
 | 升降 / 腰部 | — | — | — | ✅ `set_lift_pose`/`lift_to_clearance`/`turn_waist` |
 | 目标接近 | — | — | — | ✅ `approach_for_grasp`/`approach_for_place`（`motion.goal`） |
@@ -34,9 +34,9 @@
 | RGB | ✅ 合成图像 | ◐ 腕部 RealSense | ◐ 桌面 RealSense D405 | ✅ 腰部 + 头部双路 |
 | 深度 | ◐ 测试场景可生成，但不声明 `vision.depth` | ◐ 相机启用时 | ◐ 相机启用时 | ✅ 腰部 RGBD |
 | 开放词汇检测 | ✅ 测试/仿真路径 | ◐ 相机 + 检测服务 | ◐ 相机 + 检测服务 | ◐ 相机 + 检测服务 |
-| 主动搜索 | — | — | — | ✅ `vision.search` + `search_target`（头/腰扫视） |
-| 相机安装模型 | 合成场景 | eye-in-hand | eye-to-hand | eye-to-hand（腰部静态 + 头部随动） |
-| 手眼变换 | 测试几何 | `T_base_flange(live) @ T_flange_cam` | 固定 `T_base_cam` | 固定 `T_base_cam`（腰部） |
+| 主动搜索 | — | — | — | ✅ `vision.search` + `search_target`（当前朝向检查头/腰相机并报方位） |
+| 相机安装模型 | 合成场景 | eye-in-hand | eye-to-hand | eye-to-hand（腰部 + 头部随动） |
+| 手眼变换 | 测试几何 | `T_base_flange(live) @ T_flange_cam` | 固定 `T_base_cam` | 实时 `T_base_cam`（TF 查找，静态标定回退；头部按关节实时算） |
 | 可达性（URDF） | — | — | — | ✅ `planning.reachability`（双臂 + 自适应升降判据） |
 | 检测 sidecar | — | ◐ `detector.spawn=true` | ◐ `detector.spawn=true` | ◐（`api_servers`） |
 | 主要可选依赖 | `dev`（测试） | `piper`；视觉再加 `full` | Python 3.12 + `so101`；视觉再加 `full` | `cruzr`；视觉再加 `full`；运行时需 source ROS 工作区 |
@@ -56,7 +56,7 @@
 |---|---|---|---|---|---|---|
 | `motion.cartesian` | `CartesianDriver` | `goto_xyzr`、`goto_pose`、`move_direction`、`get_pose`、`get_home_pose` | ✅ | ✅ | ✅ | — |
 | `motion.joint` | `JointDriver`/`NamedJointDriver` | `move_joint`、`move_named_joint`、`get_joint_positions` | — | ✅ | ✅ | ✅ |
-| `motion.servo` | `ServoDriver` + fast controller hook | —（无独立公共动作，经 robot_control 可达） | ✅ | ✅ | ✅ | — |
+| `motion.servo` | `ServoDriver` + fast controller hook | —（无独立公共动作，由 fast path 实时伺服 op 驱动） | ✅ | ✅ | ✅ | — |
 | `motion.base` | Env 动词 `navigate_relative`/`navigate_arc` | `navigate_relative`、`rotate_base`、`drive_arc` | — | — | — | ✅ |
 | `motion.base_servo` | Env 动词 `start_base_drive` 等 | —（连续底盘驱动原语） | — | — | — | ✅ |
 | `motion.lift` | Env 动词 `set_lifter` | `set_lift_pose`、`lift_to_clearance` | — | — | — | ✅ |
@@ -68,8 +68,8 @@
 | `grasp.suction` | `SuctionDriver` | `activate_suction`、`deactivate_suction` | — | — | — | — |
 | `vision.camera` | `grab_rgb`/`grab_calibrated_frame` | `get_image`、`pixel_to_base_xyz` | ✅ | ◐ | ◐ | ✅ |
 | `vision.depth` | `grab_calibrated_frame` | —（不单独生成动作） | — | ◐ | ◐ | ✅ |
-| `vision.detection` | `vision.detect_and_centroid` + RAW 投影接缝 | `get_grasp_info_simple`、`locate_for_grasp`、`locate_for_place`、`analyze_scene` | ✅ | ◐ | ◐ | ◐ |
-| `vision.eye_to_hand` | 相机安装标记 | —（不生成独立动作） | — | — | ◐ | ✅ |
+| `vision.detection` | 标定 `CameraFrame` + 检测器钩子 + `perception/scene3d` | `get_grasp_info_simple`、`locate_for_grasp`、`locate_for_place`、`analyze_scene` | ✅ | ◐ | ◐ | ◐ |
+| `vision.eye_to_hand` | 相机安装标记 | —（不生成独立动作） | — | — | ◐ | — |
 | `vision.search` | `motion/approach.search_target` | `search_target` | — | — | — | ✅ |
 | `planning.reachability` | `Reachability`（派生） | —（规划期判据） | — | — | — | ✅ |
 | `sorting.command` | 词表和适配器扩展点 | —（无内置通用工具） | — | — | — | — |
@@ -89,7 +89,7 @@
 | Skill 工作流 | ◐ | `enable_skill=False` | 启用 `SkillUseRail` 和 `RobotControlTool`；内置 `visual_pick`/`visual_place`/`transport` |
 | 自定义工具/Rail | ✅ | 无 | 通过 `extra_tools`、`extra_rails` 注入 |
 | 并行工具调用 | ◐ | `parallel_tool_calls=False` | 仅适合审计后的非运动工具；运动/抓取会拒绝，且不能与 Trace 同开 |
-| 无硬件/无模型干跑 | ✅ | `--mock` 时 | `MockArmEnv` + `MockModel`（仅 Piper），不访问 CAN、相机或模型端点 |
+| 无硬件/无模型干跑 | ✅ | `--mock` 时 | `MockArmEnv` + `MockModelClient`（工厂 `build_mock_model`，仅 Piper），不访问 CAN、相机或模型端点 |
 
 ## 5. Rails、Trace 与反馈矩阵
 
@@ -116,12 +116,12 @@
 | 检测 sidecar 生命周期 | ✅ | `make_detector_sidecar()` 随 Session 启停 |
 | mask 质心与中值深度 | ✅ | `scene3d.locate_for_grasp`/`analyze_scene` |
 | eye-in-hand 投影 | ✅ | Piper 提供实现；需要 `T_flange_cam` 与实时法兰位姿 |
-| eye-to-hand 投影 | ✅ | SO-101 / Cruzr 提供实现；需要固定 `T_base_cam` |
+| eye-to-hand 投影 | ✅ | SO-101 使用固定 `T_base_cam`；Cruzr 优先使用实时 TF，静态标定回退 |
 | XY 多点/平移校正 | ✅ | `apply_xy_correction()`，多点变换优先 |
 | 抓取与放置高度 | ✅ | `grasp_z_offset_mm`、`place_z_offset_mm` 统一应用 |
-| 主动搜索 | ✅ | `motion/approach.search_target`：原地扫视、报方位、逐步逼近 |
+| 主动搜索 | ✅ | `motion/approach.search_target`：当前朝向各看一眼、报方位、不移动本体；扫视寻靶由 `approach_*` 内部完成 |
 | 可达性先验 | ◐ | 本体带 URDF + 臂链时派生 `planning.reachability`；Cruzr 提供双臂 + 升降判据 |
-| 手眼标定脚本 | ◐ | 安装 `calib`；Piper 操作流程见[手眼标定指南](../how-to/calibrate-hand-eye.md) |
+| 手眼标定脚本 | ◐ | 安装 `calib`；Piper 见[手眼标定指南](../how-to/calibrate-hand-eye.md)，SO-101 见[SO-101 固定相机标定指南](../how-to/calibrate-so101-eye-to-hand.md) |
 
 ## 7. 用户入口与可选依赖
 
@@ -135,7 +135,7 @@
 | 视觉/GPU | ◐ | `pip install -e ".[full]"` 并使用 CUDA 12.8 PyTorch 源 |
 | 浏览器 GUI | ◐ | `pip install -e ".[gui]"`；`jiuwensymbiosis-gui`，默认 `127.0.0.1:8770` |
 | 语音前端 | ◐ | `pip install -e ".[voice]"`；FunASR/录音可选，默认 `NullTTS` |
-| 手眼标定 | ◐ | `pip install -e ".[calib,piper]"` |
+| 手眼标定 | ◐ | `pip install -e ".[calib,piper]"` 或 `.[calib,so101]` |
 | 动作/技能/状态自省 | ✅ | `jiuwensymbiosis-actions` / `-skills` / `-state` |
 | Trace 回放 | ✅ | `jiuwensymbiosis-replay` |
 | 单元测试 | ✅ | `pip install -e ".[dev]"`；`pytest tests/unit_tests/` |

@@ -4,38 +4,44 @@
 
 第一次实现适配器请阅读[构建第一个机器人适配器](../tutorial/02-build-first-adapter.md)；从 Mock 接入厂商 SDK 和真机请阅读[移植机器人硬件适配器](../how-to/port-hardware-adapter.md)。本页不提供顺序操作流程。
 
-## 1. 六个适配器文件
+## 1. 适配器文件
 
 ```text
 jiuwensymbiosis/adapters/<name>/
+├── __init__.py
 ├── config.py
 ├── lowlevel.py
 ├── env.py
 ├── api.py
 ├── session.py
 └── config_template.yaml
+
+# 可选：手眼标定 wrapper（模板 calibration.py 拷贝到独立目录）
+jiuwensymbiosis/calibration/adapters/<name>.py
 ```
 
 | 文件 | 稳定职责 | 不应包含 |
 |---|---|---|
+| `__init__.py` | 导出命名后的 Session builder，作为适配器包入口 | 硬件或业务实现 |
 | `config.py` | 配置 dataclass、`from_dict()`、`from_yaml()` | 硬件连接和任务文本 |
 | `lowlevel.py` | 厂商 SDK、CAN、串口、Socket、相机和执行器 I/O | Agent、Rail、`@implements` |
 | `env.py` | 能力、生命周期、观测、安全属性、Driver 包装 | 提示词和厂商流程编排 |
-| `api.py` | `@implements(SPEC)` 绑定、机型几何、RAW 视觉投影 | 重复的检测/校正流水线 |
+| `api.py` | `@implements(SPEC)` 绑定、机型几何、相机/标定/检测钩子 | 重复的检测/校正流水线 |
 | `session.py` | Config/Env/Api、sidecar 和附加对象接线 | 大段业务实现 |
 | `config_template.yaml` | 可部署起点及字段注释 | 用户任务和秘密凭据 |
+| `calibration.py`（可选） | 手眼标定 wrapper，暴露 `CALIBRATION_ADAPTER_SPEC` | 标定求解/质检逻辑（归 calibration 子系统） |
 
 模板位于 `templates/xxx_adapter/`。
 
 ## 2. 动作词表、能力与工具
 
-动作是什么由共享词表 `jiuwensymbiosis/api/actions.py` 的 `ActionSpec` 定义；能力词表由 `jiuwensymbiosis/env.base.KNOWN_CAPABILITIES` 定义。每个 `ActionSpec` 声明：名字、描述、能力门、参数名、结果形状、前置条件与效果、位置新鲜度、是否对规划器可见。
+动作契约由 `api/decorators.py:ActionSpec` 声明，共享词表实例集中在 `jiuwensymbiosis/api/actions.py`；能力词表由 `jiuwensymbiosis/env.base.KNOWN_CAPABILITIES` 定义。每个 `ActionSpec` 声明：名字、描述、能力门、参数名、结果形状、前置条件与效果（含屏障开/闭 `opens_access`/`closes_access`）、位置新鲜度、是否对规划器可见。
 
 | Capability | 动作（`ActionSpec`） |
 |---|---|
 | `motion.cartesian` | `goto_xyzr`、`goto_pose`、`move_direction`、`get_pose`、`get_home_pose` |
 | `motion.joint` | `move_joint`、`move_named_joint`、`get_joint_positions` |
-| `motion.servo` | （无独立公共动作；经 `robot_control` 可达） |
+| `motion.servo` | （无独立公共动作；由 fast path 实时伺服 op `track_detect`/`track_grasp` 经 `api.servo_to_tip`/`env.servo_to_flange` 驱动） |
 | `motion.base` | `navigate_relative`、`rotate_base`、`drive_arc` |
 | `motion.base_servo` | （连续底盘驱动原语） |
 | `motion.lift` | `set_lift_pose`、`lift_to_clearance` |
@@ -73,6 +79,7 @@ Protocol 定义在 `jiuwensymbiosis/env/protocol.py`，**按能力切片**——
 | `SuctionDriver` | `grasp.suction` | `suction_state`、`suction_di_last`、`set_suction(on)` |
 | `GripperDriver` | `grasp.parallel` | `set_gripper(on)`、`gripper_state` |
 | `VisionDriver` | eye-in-hand `vision.detection` | `tf_flange_cam`、`calibration` |
+| `HandGuidingDriver`（可选） | 人工拖动示教 | `hand_guiding(*, include_end_effector=False)` 上下文管理器（释放力矩→人工摆位→恢复前先同步目标，失败抛 `HandGuidingRecoveryError`） |
 
 关键语义：
 
@@ -126,6 +133,7 @@ Env 属性：
 | `lift_limits` | `None` | SafetyRail，`set_lifter` 的软限位 |
 | `waist_step_limit_rad` | `None` | SafetyRail，`turn_waist` 单命令上限 |
 | `cameras` | `(None,)` | 可感知相机列表（最佳优先）；`grab_calibrated_frame(camera)` |
+| `holding_payload` | 无 | RecoveryRail 归位前查它——还抱着东西的本体不能盲目归位 |
 | `urdf_path`/`arm_chains`/`arm_joints` | `None` | 派生 `planning.reachability`；双臂各自驱动的关节 |
 
 已有默认委托：
@@ -153,7 +161,7 @@ Api 子类化 `BaseRobotApi`，用 `@implements(SPEC)` 绑定每条动作。内�
 
 `@implements` 将 `ToolMeta`（spec + 由这个本体签名推导的 `input_params`）挂到方法上；签名接不下 spec 承诺的参数时，导入即抛 `ContractViolation`。bring-up、标定与调试视图**不是动作**：不加装饰器，用 `scripts/` 下的脚本驱动。
 
-视觉适配器只需实现 `_project_pixel_to_base_raw(u, v, depth_m)`：eye-in-hand 组合实时 `T_base_flange @ T_flange_cam`，eye-to-hand 使用固定 `T_base_cam`。RAW 方法不得应用校正。`locate_for_grasp`/`locate_for_place`/`analyze_scene` 已由 `perception/scene3d` 共享实现（`api/defaults` 转发），`search_target`/`approach_for_grasp`/`approach_for_place` 已由 `motion/approach` 共享实现——适配器只需要在需要机型专属几何时覆写。
+视觉适配器实现 `@implements(PIXEL_TO_BASE_XYZ)` 的 `pixel_to_base_xyz(u, v, depth_m)` 投影动作：eye-in-hand 可转发 `perception/vision.default_pixel_to_base_xyz`（提供 `pose_to_tf` 回调，组合实时 `T_base_flange @ T_flange_cam`，并按标定应用 XY 校正），eye-to-hand 使用 `T_base_cam`。`locate_for_grasp`/`locate_for_place`/`analyze_scene` 已由 `perception/scene3d` 共享实现（`api/defaults` 转发），直接消费标定 `CameraFrame` 与检测器钩子；`search_target`/`approach_for_grasp`/`approach_for_place` 已由 `motion/approach` 共享实现——适配器只提供相机/标定/检测钩子，并在需要机型专属几何时覆写。
 
 ## 6. Config 与 Session Builder
 
@@ -210,12 +218,12 @@ make_builder(
 | `adapters/_common/safety.py` | `WorkspaceBounds`、`check_flange_z()` | TIP/FLANGE Z 防御 |
 | `perception/detector_client.py` | `init_detector()` | HTTP 检测客户端 |
 | `perception/detector_sidecar.py` | `detector_subprocess()` | 检测服务生命周期 |
-| `perception/scene3d.py` | `locate_for_grasp()`、`locate_for_place()`、`analyze_scene()` | 检测→质心/中值深度→RAW 投影→校正→几何（3-D 场景感知） |
-| `perception/vision.py` | `detect_and_centroid()`、`apply_xy_correction()`、`build_grasp_result()` | 检测/校正共享函数 |
+| `perception/scene3d.py` | `locate_for_grasp()`、`locate_for_place()`、`analyze_scene()` | 标定帧→检测→掩膜点云→物体/表面几何（3-D 场景感知） |
+| `perception/vision.py` | `detect_and_centroid()`、`apply_xy_correction()`、`default_pixel_to_base_xyz()`、`default_get_grasp_info_simple()` | 检测/校正/eye-in-hand 投影共享函数 |
 | `perception/calibration.py` | `load_calibration()` | 版本化手眼标定加载 |
 | `motion/approach.py` | `search_target()`、`approach_target_for_grasp()`、`approach_target_for_place()` | 寻靶→对准目标面→收敛到工作位姿（基础接近） |
 | `motion/dual_arm.py` | `dual_arm_grasp()`、`dual_arm_place()` | 双臂协同抓/放（含接触力确认） |
-| `contracts.py` | `GraspResult`、`ObjectGeometryResult`、`SPATIAL_RELATIONS` 等 | 动作结果类型 + 空间关系集（归属任何层） |
+| `contracts.py` | `GraspResult`、`ObjectGeometryResult`、`SPATIAL_RELATIONS` 等 | 动作结果类型 + 空间关系集（不归属任何层） |
 
 ### `init_detector`
 
@@ -270,20 +278,19 @@ xyz_final, description = apply_xy_correction(
 | 入口 | 作用 |
 |---|---|
 | `scripts/validate_adapter.py --module ...` | 静态检查目录、签名、能力对齐和 Driver 成员 |
-| `scripts/smoke_test_adapter.py --module ...` | 连接 Mock Env，调用所有生成工具并检查可序列化结果 |
+| `scripts/smoke_test_adapter.py --module ...` | 向 Env 注入桩驱动（不真实连接硬件），调用所有生成工具并检查可序列化结果 |
 | `tests/unit_tests/env/` | Env、能力和安全属性参考测试 |
 | `tests/unit_tests/api/` | 动作词表、`@implements` 和 capability 推导 |
 | `tests/unit_tests/agent/` | Session、Builder、Rails 和工具装配 |
 | `tests/mocks/` | Mock Driver、Env、Api 和场景 |
 
-常见验证结果：
+常见验证结果（验证器实际输出为中文+编号，此处按含义归纳）：
 
 | 现象 | 含义 |
 |---|---|
-| unknown capability | Env 字符串不在词表 |
-| Api capability missing from Env | 工具被能力交集过滤 |
-| Driver member missing | 声明的能力与 Driver Protocol 不一致 |
-| tool result not serializable | 工具返回了 ndarray、Pose 或其他原生对象 |
+| 未知能力（如 E-04） | Env 字符串不在词表 |
+| Api 能力不在 Env.capabilities 中（A-08） | 工具被能力交集过滤 |
+| 驱动缺少能力所需方法（如 D-14） | 声明的能力与 Driver Protocol 不一致 |
 
 ## 10. 内置适配器实现位置对照
 
@@ -292,7 +299,7 @@ xyz_final, description = apply_xy_correction(
 | 能力与 Env | `adapters/piper/env.py` | `adapters/so101/env.py` | `adapters/cruzr/env.py` |
 | 厂商驱动 | `adapters/piper/lowlevel.py` | `adapters/so101/lowlevel.py` | `adapters/cruzr/lowlevel.py` |
 | 几何 | `adapters/piper/geometry.py` | `adapters/so101/geometry.py` | `adapters/cruzr/geometry.py` |
-| 标定 | `adapters/piper/_calibration.py` | （模型内标定/台账） | `adapters/cruzr/_calibration.py` |
+| 标定 | `adapters/piper/_calibration.py` + `calibration/adapters/piper.py` | `adapters/so101/_calibration.py` + `calibration/adapters/so101.py` | `adapters/cruzr/_calibration.py`（仅相机标定加载） |
 | Api | `adapters/piper/api.py` | `adapters/so101/api.py` | `adapters/cruzr/api.py` |
 | Config | `adapters/piper/config.py` | `adapters/so101/config.py` | `adapters/cruzr/config.py` |
 | Session | `adapters/piper/session.py` | `adapters/so101/session.py` | `adapters/cruzr/session.py` |
